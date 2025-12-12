@@ -1018,3 +1018,141 @@ async def run_autonomous_agent(
         status_manager.update(state=BuildState.COMPLETE)
     else:
         status_manager.update(state=BuildState.PAUSED)
+
+
+async def run_followup_planner(
+    project_dir: Path,
+    spec_dir: Path,
+    model: str,
+    verbose: bool = False,
+) -> bool:
+    """
+    Run the follow-up planner to add new chunks to a completed spec.
+
+    This is a simplified version of run_autonomous_agent that:
+    1. Creates a client
+    2. Loads the followup planner prompt
+    3. Runs a single planning session
+    4. Returns after the plan is updated (doesn't enter coding loop)
+
+    The planner agent will:
+    - Read FOLLOWUP_REQUEST.md for the new task
+    - Read the existing implementation_plan.json
+    - Add new phase(s) with pending chunks
+    - Update the plan status back to in_progress
+
+    Args:
+        project_dir: Root directory for the project
+        spec_dir: Directory containing the completed spec
+        model: Claude model to use
+        verbose: Whether to show detailed output
+
+    Returns:
+        bool: True if planning completed successfully
+    """
+    from prompts import get_followup_planner_prompt
+    from implementation_plan import ImplementationPlan
+
+    # Initialize status manager for ccstatusline
+    status_manager = StatusManager(project_dir)
+    status_manager.set_active(spec_dir.name, BuildState.PLANNING)
+
+    # Initialize task logger for persistent logging
+    task_logger = get_task_logger(spec_dir)
+
+    # Show header
+    content = [
+        bold(f"{icon(Icons.GEAR)} FOLLOW-UP PLANNER SESSION"),
+        "",
+        f"Spec: {highlight(spec_dir.name)}",
+        muted("Adding follow-up work to completed spec."),
+        "",
+        muted("The agent will read your FOLLOWUP_REQUEST.md and add new chunks."),
+    ]
+    print()
+    print(box(content, width=70, style="heavy"))
+    print()
+
+    # Start planning phase in task logger
+    if task_logger:
+        task_logger.start_phase(LogPhase.PLANNING, "Starting follow-up planning...")
+        task_logger.set_session(1)
+
+    # Create client (fresh context)
+    client = create_client(project_dir, spec_dir, model)
+
+    # Generate follow-up planner prompt
+    prompt = get_followup_planner_prompt(spec_dir)
+
+    print_status("Running follow-up planner...", "progress")
+    print()
+
+    try:
+        # Run single planning session
+        async with client:
+            status, response = await run_agent_session(
+                client, prompt, spec_dir, verbose, phase=LogPhase.PLANNING
+            )
+
+        # End planning phase in task logger
+        if task_logger:
+            task_logger.end_phase(
+                LogPhase.PLANNING,
+                success=(status != "error"),
+                message="Follow-up planning session completed"
+            )
+
+        if status == "error":
+            print()
+            print_status("Follow-up planning failed", "error")
+            status_manager.update(state=BuildState.ERROR)
+            return False
+
+        # Verify the plan was updated (should have pending chunks now)
+        plan_file = spec_dir / "implementation_plan.json"
+        if plan_file.exists():
+            plan = ImplementationPlan.load(plan_file)
+
+            # Check if there are any pending chunks
+            all_chunks = [c for p in plan.phases for c in p.chunks]
+            pending_chunks = [c for c in all_chunks if c.status.value == "pending"]
+
+            if pending_chunks:
+                # Reset the plan status to in_progress (in case planner didn't)
+                plan.reset_for_followup()
+                plan.save(plan_file)
+
+                print()
+                content = [
+                    bold(f"{icon(Icons.SUCCESS)} FOLLOW-UP PLANNING COMPLETE"),
+                    "",
+                    f"New pending chunks: {highlight(str(len(pending_chunks)))}",
+                    f"Total chunks: {len(all_chunks)}",
+                    "",
+                    muted("Next steps:"),
+                    f"  Run: {highlight(f'python auto-claude/run.py --spec {spec_dir.name}')}",
+                ]
+                print(box(content, width=70, style="heavy"))
+                print()
+                status_manager.update(state=BuildState.PAUSED)
+                return True
+            else:
+                print()
+                print_status("Warning: No pending chunks found after planning", "warning")
+                print(muted("The planner may not have added new chunks."))
+                print(muted("Check implementation_plan.json manually."))
+                status_manager.update(state=BuildState.PAUSED)
+                return False
+        else:
+            print()
+            print_status("Error: implementation_plan.json not found after planning", "error")
+            status_manager.update(state=BuildState.ERROR)
+            return False
+
+    except Exception as e:
+        print()
+        print_status(f"Follow-up planning error: {e}", "error")
+        if task_logger:
+            task_logger.log_error(f"Follow-up planning error: {e}", LogPhase.PLANNING)
+        status_manager.update(state=BuildState.ERROR)
+        return False
