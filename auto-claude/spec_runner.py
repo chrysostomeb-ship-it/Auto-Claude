@@ -60,6 +60,7 @@ elif dev_env_file.exists():
 from client import create_client
 from validate_spec import SpecValidator, auto_fix_plan
 from linear_updater import is_linear_enabled, create_linear_task
+from review import ReviewState, run_review_checkpoint
 from ui import (
     Icons,
     icon,
@@ -1564,8 +1565,16 @@ Read the failed files, understand the errors, and fix them.
 
     # === Main Orchestration ===
 
-    async def run(self, interactive: bool = True) -> bool:
-        """Run the spec creation process with dynamic phase selection."""
+    async def run(self, interactive: bool = True, auto_approve: bool = False) -> bool:
+        """Run the spec creation process with dynamic phase selection.
+
+        Args:
+            interactive: Whether to run in interactive mode for requirements gathering
+            auto_approve: Whether to skip human review checkpoint and auto-approve
+
+        Returns:
+            True if spec creation and review completed successfully, False otherwise
+        """
         debug_section("spec_runner", "Starting Spec Creation")
         debug("spec_runner", "Configuration",
               spec_dir=str(self.spec_dir),
@@ -1701,6 +1710,36 @@ Read the failed files, understand the errors, and fix them.
             title=f"{icon(Icons.SUCCESS)} SPEC CREATION COMPLETE",
             style="heavy"
         ))
+
+        # === HUMAN REVIEW CHECKPOINT ===
+        # Pause before build to allow human to review spec and implementation plan
+        print()
+        print_section("HUMAN REVIEW CHECKPOINT", Icons.SEARCH)
+
+        try:
+            review_state = run_review_checkpoint(
+                spec_dir=self.spec_dir,
+                auto_approve=auto_approve,
+            )
+
+            if not review_state.is_approved():
+                # User rejected or exited without approval
+                print()
+                print_status("Build will not proceed without approval.", "warning")
+                return False
+
+            debug_success("spec_runner", "Review checkpoint passed - spec approved")
+
+        except SystemExit as e:
+            # run_review_checkpoint may call sys.exit() on reject or Ctrl+C
+            if e.code != 0:
+                return False
+            # Code 0 means graceful exit (e.g., Ctrl+C with saved feedback)
+            return False
+        except KeyboardInterrupt:
+            print()
+            print_status("Review interrupted. Run again to continue.", "info")
+            return False
 
         return True
 
@@ -1850,7 +1889,10 @@ Examples:
     )
 
     try:
-        success = asyncio.run(orchestrator.run(interactive=args.interactive or not task_description))
+        success = asyncio.run(orchestrator.run(
+            interactive=args.interactive or not task_description,
+            auto_approve=args.auto_approve,
+        ))
 
         if not success:
             sys.exit(1)

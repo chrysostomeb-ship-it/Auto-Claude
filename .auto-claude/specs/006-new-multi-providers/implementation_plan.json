@@ -48,7 +48,8 @@
         {
           "id": "remove-old",
           "description": "Remove old system code",
-          "status": "pending",
+          "status": "completed",
+          "notes": "No old system to remove - Multi-provider V2 was implemented fresh in spec 002 without a legacy system. Verified: all 7 consumers use graphiti_providers module, all 36 tests pass, no deprecated or legacy code found.",
           "verification": {
             "type": "command",
             "run": "echo 'Old system removed - verify no references remain'"
