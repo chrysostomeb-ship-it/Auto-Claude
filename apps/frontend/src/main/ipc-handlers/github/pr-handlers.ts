@@ -233,9 +233,9 @@ async function runPRReview(
 
     const child = spawn(pythonPath, [
       runnerPath,
+      '--project', project.path,
       'review-pr',
       prNumber.toString(),
-      '--project', project.path,
     ], {
       cwd: backendPath,
       env: {

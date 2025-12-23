@@ -275,7 +275,7 @@ async function runTriage(
 
     const pythonPath = path.join(backendPath, '.venv', 'bin', 'python');
 
-    const args = [runnerPath, 'triage', '--project', project.path];
+    const args = [runnerPath, '--project', project.path, 'triage'];
 
     if (issueNumbers && issueNumbers.length > 0) {
       args.push(...issueNumbers.map(n => n.toString()));
