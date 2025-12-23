@@ -47,8 +47,12 @@ if env_file.exists():
 
 from debug import debug_error
 
-from .models import GitHubRunnerConfig
-from .orchestrator import GitHubOrchestrator, ProgressCallback
+# Add github runner directory to path for direct imports
+sys.path.insert(0, str(Path(__file__).parent))
+
+# Now import models and orchestrator directly (they use relative imports internally)
+from models import GitHubRunnerConfig
+from orchestrator import GitHubOrchestrator, ProgressCallback
 
 
 def print_progress(callback: ProgressCallback) -> None:

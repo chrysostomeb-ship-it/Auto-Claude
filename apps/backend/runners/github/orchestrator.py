@@ -18,17 +18,32 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from .models import (
-    AutoFixState,
-    AutoFixStatus,
-    GitHubRunnerConfig,
-    PRReviewFinding,
-    PRReviewResult,
-    ReviewCategory,
-    ReviewSeverity,
-    TriageCategory,
-    TriageResult,
-)
+try:
+    # When imported as part of package
+    from .models import (
+        AutoFixState,
+        AutoFixStatus,
+        GitHubRunnerConfig,
+        PRReviewFinding,
+        PRReviewResult,
+        ReviewCategory,
+        ReviewSeverity,
+        TriageCategory,
+        TriageResult,
+    )
+except ImportError:
+    # When imported directly (runner.py adds github dir to path)
+    from models import (
+        AutoFixState,
+        AutoFixStatus,
+        GitHubRunnerConfig,
+        PRReviewFinding,
+        PRReviewResult,
+        ReviewCategory,
+        ReviewSeverity,
+        TriageCategory,
+        TriageResult,
+    )
 
 
 @dataclass
