@@ -231,6 +231,7 @@ export interface GitHubAPI {
   // PR operations
   listPRs: (projectId: string) => Promise<PRData[]>;
   runPRReview: (projectId: string, prNumber: number) => void;
+  cancelPRReview: (projectId: string, prNumber: number) => Promise<boolean>;
   postPRReview: (projectId: string, prNumber: number, selectedFindingIds?: string[]) => Promise<boolean>;
   deletePRReview: (projectId: string, prNumber: number) => Promise<boolean>;
   postPRComment: (projectId: string, prNumber: number, body: string) => Promise<boolean>;
