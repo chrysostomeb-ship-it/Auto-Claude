@@ -65,8 +65,8 @@ export function TaskDetailModal({ open, task, onOpenChange }: TaskDetailModalPro
 function TaskDetailModalContent({ open, task, onOpenChange }: { open: boolean; task: Task; onOpenChange: (open: boolean) => void }) {
   const state = useTaskDetail({ task });
   const progressPercent = calculateProgress(task.subtasks);
-  const completedSubtasks = task.subtasks.filter(s => s.status === 'completed').length;
-  const totalSubtasks = task.subtasks.length;
+  const completedSubtasks = task.subtasks?.filter(s => s.status === 'completed').length || 0;
+  const totalSubtasks = task.subtasks?.length || 0;
 
   // Event Handlers
   const handleStartStop = () => {
@@ -358,7 +358,7 @@ function TaskDetailModalContent({ open, task, onOpenChange }: { open: boolean; t
                     value="subtasks"
                     className="rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:shadow-none px-4 py-2.5 text-sm"
                   >
-                    Subtasks ({task.subtasks.length})
+                    Subtasks ({task.subtasks?.length || 0})
                   </TabsTrigger>
                   <TabsTrigger
                     value="logs"

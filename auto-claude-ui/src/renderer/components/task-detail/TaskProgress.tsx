@@ -56,8 +56,8 @@ export function TaskProgress({ task, isRunning, hasActiveExecution, executionPha
         <span className="text-xs text-muted-foreground">
           {hasActiveExecution && task.executionProgress?.message
             ? task.executionProgress.message
-            : task.subtasks.length > 0
-              ? `${task.subtasks.filter(c => c.status === 'completed').length}/${task.subtasks.length} subtasks completed`
+            : (task.subtasks?.length || 0) > 0
+              ? `${task.subtasks?.filter(c => c.status === 'completed').length || 0}/${task.subtasks?.length || 0} subtasks completed`
               : 'No subtasks yet'}
         </span>
         <span className={cn(

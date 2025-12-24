@@ -28,7 +28,7 @@ export function TaskSubtasks({ task }: TaskSubtasksProps) {
   return (
     <ScrollArea className="h-full">
       <div className="p-4 space-y-3">
-        {task.subtasks.length === 0 ? (
+        {!task.subtasks || task.subtasks.length === 0 ? (
           <div className="text-center py-12">
             <ListChecks className="h-10 w-10 mx-auto mb-3 text-muted-foreground/30" />
             <p className="text-sm font-medium text-muted-foreground mb-1">No subtasks defined</p>

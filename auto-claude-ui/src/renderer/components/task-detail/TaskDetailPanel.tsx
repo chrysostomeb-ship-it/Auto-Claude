@@ -144,7 +144,7 @@ export function TaskDetailPanel({ task, onClose }: TaskDetailPanelProps) {
               value="subtasks"
               className="rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:shadow-none px-4 py-2.5 text-sm"
             >
-              Subtasks ({task.subtasks.length})
+              Subtasks ({task.subtasks?.length || 0})
             </TabsTrigger>
             <TabsTrigger
               value="logs"
