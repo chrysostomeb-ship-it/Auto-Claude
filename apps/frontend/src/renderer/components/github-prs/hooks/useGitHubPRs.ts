@@ -96,6 +96,20 @@ export function useGitHubPRs(projectId?: string): UseGitHubPRsResult {
           const result = await window.electronAPI.github.listPRs(projectId);
           if (result) {
             setPrs(result);
+
+            // Preload review results for all PRs
+            result.forEach(pr => {
+              const existingState = getPRReviewState(projectId, pr.number);
+              // Only fetch from disk if we don't have a result in the store
+              if (!existingState?.result) {
+                window.electronAPI.github.getPRReview(projectId, pr.number).then(reviewResult => {
+                  if (reviewResult) {
+                    // Update store with the loaded result
+                    usePRReviewStore.getState().setPRReviewResult(projectId, reviewResult);
+                  }
+                });
+              }
+            });
           }
         }
       } else {
@@ -109,7 +123,7 @@ export function useGitHubPRs(projectId?: string): UseGitHubPRsResult {
     } finally {
       setIsLoading(false);
     }
-  }, [projectId]);
+  }, [projectId, getPRReviewState]);
 
   useEffect(() => {
     fetchPRs();
