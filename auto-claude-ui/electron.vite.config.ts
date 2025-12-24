@@ -51,6 +51,7 @@ export default defineConfig({
       }
     },
     server: {
+      host: true,
       watch: {
         // Ignore directories to prevent HMR conflicts during merge operations
         // Using absolute paths and broader patterns

@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import type { Project, ProjectSettings, AutoBuildVersionInfo, InitializationResult } from '../../shared/types';
+import { setCurrentProjectId } from '../lib/web-api';
 
 // localStorage keys for persisting project state (legacy - now using IPC)
 const LAST_SELECTED_PROJECT_KEY = 'lastSelectedProjectId';
@@ -86,6 +87,8 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     } else {
       localStorage.removeItem(LAST_SELECTED_PROJECT_KEY);
     }
+    // Update web-api's current project ID for API calls
+    setCurrentProjectId(projectId);
     set({ selectedProjectId: projectId });
   },
 
