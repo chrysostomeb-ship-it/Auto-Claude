@@ -560,9 +560,24 @@ export function registerPRHandlers(
             overallStatus === 'request_changes' ? '--request-changes' : '--comment';
 
           debugLog('Posting review to GitHub', { prNumber, status: overallStatus, findingsCount: findings.length });
-          execSync(`gh pr review ${prNumber} ${eventFlag} --body "${body.replace(/"/g, '\\"')}"`, {
-            cwd: project.path,
-          });
+
+          // Use temp file to avoid shell escaping issues with special characters
+          const { writeFileSync, unlinkSync } = await import('fs');
+          const { join } = await import('path');
+          const tmpFile = join(project.path, '.auto-claude', 'tmp_review_body.txt');
+          try {
+            writeFileSync(tmpFile, body, 'utf-8');
+            execSync(`gh pr review ${prNumber} ${eventFlag} --body-file "${tmpFile}"`, {
+              cwd: project.path,
+            });
+            unlinkSync(tmpFile); // Clean up temp file
+          } catch (error) {
+            // Clean up temp file even on error
+            try { unlinkSync(tmpFile); } catch {
+              // Ignore cleanup errors
+            }
+            throw error;
+          }
 
           debugLog('Review posted successfully', { prNumber });
           return true;
@@ -583,10 +598,26 @@ export function registerPRHandlers(
       const postResult = await withProjectOrNull(projectId, async (project) => {
         try {
           const { execSync } = await import('child_process');
+          const { writeFileSync, unlinkSync } = await import('fs');
+          const { join } = await import('path');
+
           debugLog('Posting comment to PR', { prNumber });
-          execSync(`gh pr comment ${prNumber} --body "${body.replace(/"/g, '\\"')}"`, {
-            cwd: project.path,
-          });
+
+          // Use temp file to avoid shell escaping issues
+          const tmpFile = join(project.path, '.auto-claude', 'tmp_comment_body.txt');
+          try {
+            writeFileSync(tmpFile, body, 'utf-8');
+            execSync(`gh pr comment ${prNumber} --body-file "${tmpFile}"`, {
+              cwd: project.path,
+            });
+            unlinkSync(tmpFile);
+          } catch (error) {
+            try { unlinkSync(tmpFile); } catch {
+              // Ignore cleanup errors
+            }
+            throw error;
+          }
+
           debugLog('Comment posted successfully', { prNumber });
           return true;
         } catch (error) {
