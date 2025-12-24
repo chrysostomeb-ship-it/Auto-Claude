@@ -314,7 +314,7 @@ export function TaskCard({ task, onClick }: TaskCardProps) {
         )}
 
         {/* Progress section - Phase-aware with animations */}
-        {(task.subtasks.length > 0 || hasActiveExecution || isRunning || isStuck) && (
+        {((task.subtasks?.length || 0) > 0 || hasActiveExecution || isRunning || isStuck) && (
           <div className="mt-4">
             <PhaseProgressIndicator
               phase={executionPhase}

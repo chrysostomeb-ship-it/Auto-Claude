@@ -4,7 +4,7 @@ import type { ExecutionPhase, TaskLogs, Subtask } from '../../shared/types';
 
 interface PhaseProgressIndicatorProps {
   phase?: ExecutionPhase;
-  subtasks: Subtask[];
+  subtasks?: Subtask[];
   phaseLogs?: TaskLogs | null;
   isStuck?: boolean;
   isRunning?: boolean;
@@ -37,8 +37,8 @@ export function PhaseProgressIndicator({
   className,
 }: PhaseProgressIndicatorProps) {
   // Calculate subtask-based progress (for coding phase)
-  const completedSubtasks = subtasks.filter((c) => c.status === 'completed').length;
-  const totalSubtasks = subtasks.length;
+  const completedSubtasks = subtasks?.filter((c) => c.status === 'completed').length || 0;
+  const totalSubtasks = subtasks?.length || 0;
   const subtaskProgress = totalSubtasks > 0 ? Math.round((completedSubtasks / totalSubtasks) * 100) : 0;
 
   // Get log entry counts for activity indication
