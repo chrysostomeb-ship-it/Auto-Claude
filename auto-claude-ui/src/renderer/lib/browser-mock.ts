@@ -25,10 +25,11 @@ import {
 // Check if we're in Electron
 const isElectron = typeof window !== 'undefined' && window.electronAPI !== undefined;
 
-// Check if we're connected to the web server (not just file:// or localhost dev)
+// Check if we're in web mode (set by vite.web.config.ts or when served from Express)
+// This works in both dev mode (Vite with proxy) and production (Express serving static files)
 const isWebServerMode = typeof window !== 'undefined' &&
   !isElectron &&
-  (window.location.port === '8080' || window.location.pathname.startsWith('/api'));
+  (process.env.IS_WEB === 'true' || window.location.port === '8080');
 
 /**
  * Create mock electronAPI for browser
