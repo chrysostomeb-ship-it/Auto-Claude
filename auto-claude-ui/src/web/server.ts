@@ -343,13 +343,16 @@ app.get('/api/tasks', (req, res) => {
         }
       }
 
+      // Override status if task is currently running in memory
+      const effectiveStatus = runningTasks.has(specName) ? 'in_progress' : status;
+
       tasks.push({
         id: specName,
         specId: specName,
         projectId: projectId,
         title,
         description,
-        status,
+        status: effectiveStatus,
         subtasks,
         logs: [],
         specDir: path.join(specsDir, specName),
@@ -664,6 +667,21 @@ app.post('/api/tasks/:id/start', (req, res) => {
     projectPath: project.path
   });
 
+  // Update implementation_plan.json status to 'in_progress' (persist to disk like Electron)
+  const planPath = path.join(project.path, '.auto-claude', 'specs', taskId, 'implementation_plan.json');
+  if (existsSync(planPath)) {
+    try {
+      const plan = JSON.parse(readFileSync(planPath, 'utf-8'));
+      plan.status = 'in_progress';
+      plan.planStatus = 'in_progress';
+      plan.updated_at = new Date().toISOString();
+      writeFileSync(planPath, JSON.stringify(plan, null, 2));
+      console.log('[Task Start] Updated implementation_plan.json status to in_progress');
+    } catch (err) {
+      console.error('[Task Start] Failed to update implementation_plan.json:', err);
+    }
+  }
+
   // Broadcast status change to 'in_progress' when task starts
   broadcast('task:statusChange', { taskId, status: 'in_progress' });
 
@@ -703,8 +721,27 @@ app.post('/api/tasks/:id/start', (req, res) => {
     console.log('[Task exit]', taskId, 'code:', code);
     runningTasks.delete(taskId);
     broadcast('task:exit', { taskId, code });
+
+    // Determine final status based on exit code
+    const finalStatus = code === 0 ? 'human_review' : 'backlog';
+
+    // Update implementation_plan.json status (persist to disk like Electron)
+    const exitPlanPath = path.join(project.path, '.auto-claude', 'specs', taskId, 'implementation_plan.json');
+    if (existsSync(exitPlanPath)) {
+      try {
+        const exitPlan = JSON.parse(readFileSync(exitPlanPath, 'utf-8'));
+        exitPlan.status = finalStatus;
+        exitPlan.planStatus = finalStatus === 'human_review' ? 'review' : 'pending';
+        exitPlan.updated_at = new Date().toISOString();
+        writeFileSync(exitPlanPath, JSON.stringify(exitPlan, null, 2));
+        console.log('[Task exit] Updated implementation_plan.json status to', finalStatus);
+      } catch (err) {
+        console.error('[Task exit] Failed to update implementation_plan.json:', err);
+      }
+    }
+
     // Broadcast status change when task completes
-    broadcast('task:statusChange', { taskId, status: code === 0 ? 'review' : 'failed' });
+    broadcast('task:statusChange', { taskId, status: finalStatus });
   });
 
   res.json({ success: true });
