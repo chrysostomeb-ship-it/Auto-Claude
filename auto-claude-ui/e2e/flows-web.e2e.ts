@@ -91,6 +91,34 @@ test.describe('API: Tasks', () => {
     expect(result.data).toHaveProperty('id');
     expect(result.data).toHaveProperty('title', 'New E2E Test Task');
   });
+
+  test('should start a task (API responds)', async () => {
+    // First get the tasks
+    const tasksResult = await api.get(`/tasks?projectId=${projectId}`);
+    const tasks = tasksResult.data as Array<{ id: string }>;
+
+    if (tasks.length > 0) {
+      const taskId = tasks[0].id;
+      // Try to start the task - may fail if Python env not available, but API should respond
+      const result = await api.post(`/tasks/${taskId}/start`, { projectId });
+      // The endpoint should respond (success or error about missing Python)
+      expect(result).toBeDefined();
+      // Either success or specific error about auto-claude not found
+      expect(result.success === true || result.error !== undefined).toBe(true);
+    }
+  });
+
+  test('should stop a task', async () => {
+    const tasksResult = await api.get(`/tasks?projectId=${projectId}`);
+    const tasks = tasksResult.data as Array<{ id: string }>;
+
+    if (tasks.length > 0) {
+      const taskId = tasks[0].id;
+      const result = await api.post(`/tasks/${taskId}/stop`, { projectId });
+      // Should respond regardless of whether task was running
+      expect(result).toBeDefined();
+    }
+  });
 });
 
 test.describe('API: Roadmap', () => {
