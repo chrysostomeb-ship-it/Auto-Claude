@@ -10,7 +10,6 @@ All save() operations use file locking to prevent corruption in concurrent scena
 
 from __future__ import annotations
 
-import asyncio
 import json
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -402,7 +401,7 @@ class PRReviewResult:
             quick_scan_summary=data.get("quick_scan_summary", {}),
         )
 
-    def save(self, github_dir: Path) -> None:
+    async def save(self, github_dir: Path) -> None:
         """Save review result to .auto-claude/github/pr/ with file locking."""
         pr_dir = github_dir / "pr"
         pr_dir.mkdir(parents=True, exist_ok=True)
@@ -410,12 +409,12 @@ class PRReviewResult:
         review_file = pr_dir / f"review_{self.pr_number}.json"
 
         # Atomic locked write
-        asyncio.run(locked_json_write(review_file, self.to_dict(), timeout=5.0))
+        await locked_json_write(review_file, self.to_dict(), timeout=5.0)
 
         # Update index with locking
-        self._update_index(pr_dir)
+        await self._update_index(pr_dir)
 
-    def _update_index(self, pr_dir: Path) -> None:
+    async def _update_index(self, pr_dir: Path) -> None:
         """Update the PR review index with file locking."""
         index_file = pr_dir / "index.json"
 
@@ -451,7 +450,7 @@ class PRReviewResult:
             return current_data
 
         # Atomic locked update
-        asyncio.run(locked_json_update(index_file, update_index, timeout=5.0))
+        await locked_json_update(index_file, update_index, timeout=5.0)
 
     @classmethod
     def load(cls, github_dir: Path, pr_number: int) -> PRReviewResult | None:
@@ -520,7 +519,7 @@ class TriageResult:
             triaged_at=data.get("triaged_at", datetime.now().isoformat()),
         )
 
-    def save(self, github_dir: Path) -> None:
+    async def save(self, github_dir: Path) -> None:
         """Save triage result to .auto-claude/github/issues/ with file locking."""
         issues_dir = github_dir / "issues"
         issues_dir.mkdir(parents=True, exist_ok=True)
@@ -528,7 +527,7 @@ class TriageResult:
         triage_file = issues_dir / f"triage_{self.issue_number}.json"
 
         # Atomic locked write
-        asyncio.run(locked_json_write(triage_file, self.to_dict(), timeout=5.0))
+        await locked_json_write(triage_file, self.to_dict(), timeout=5.0)
 
     @classmethod
     def load(cls, github_dir: Path, issue_number: int) -> TriageResult | None:
@@ -596,7 +595,7 @@ class AutoFixState:
         self.status = status
         self.updated_at = datetime.now().isoformat()
 
-    def save(self, github_dir: Path) -> None:
+    async def save(self, github_dir: Path) -> None:
         """Save auto-fix state to .auto-claude/github/issues/ with file locking."""
         issues_dir = github_dir / "issues"
         issues_dir.mkdir(parents=True, exist_ok=True)
@@ -604,12 +603,12 @@ class AutoFixState:
         autofix_file = issues_dir / f"autofix_{self.issue_number}.json"
 
         # Atomic locked write
-        asyncio.run(locked_json_write(autofix_file, self.to_dict(), timeout=5.0))
+        await locked_json_write(autofix_file, self.to_dict(), timeout=5.0)
 
         # Update index with locking
-        self._update_index(issues_dir)
+        await self._update_index(issues_dir)
 
-    def _update_index(self, issues_dir: Path) -> None:
+    async def _update_index(self, issues_dir: Path) -> None:
         """Update the issues index with auto-fix queue using file locking."""
         index_file = issues_dir / "index.json"
 
@@ -651,7 +650,7 @@ class AutoFixState:
             return current_data
 
         # Atomic locked update
-        asyncio.run(locked_json_update(index_file, update_index, timeout=5.0))
+        await locked_json_update(index_file, update_index, timeout=5.0)
 
     @classmethod
     def load(cls, github_dir: Path, issue_number: int) -> AutoFixState | None:

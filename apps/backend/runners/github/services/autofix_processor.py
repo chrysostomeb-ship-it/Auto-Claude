@@ -36,7 +36,17 @@ class AutoFixProcessor:
     def _report_progress(self, phase: str, progress: int, message: str, **kwargs):
         """Report progress if callback is set."""
         if self.progress_callback:
-            from ..orchestrator import ProgressCallback
+            # Import at module level to avoid circular import issues
+            import sys
+
+            if "orchestrator" in sys.modules:
+                ProgressCallback = sys.modules["orchestrator"].ProgressCallback
+            else:
+                # Fallback: try relative import
+                try:
+                    from ..orchestrator import ProgressCallback
+                except ImportError:
+                    from orchestrator import ProgressCallback
 
             self.progress_callback(
                 ProgressCallback(
@@ -115,7 +125,7 @@ class AutoFixProcessor:
                 repo=self.config.repo,
                 status=AutoFixStatus.ANALYZING,
             )
-            state.save(self.github_dir)
+            await state.save(self.github_dir)
 
             self._report_progress(
                 "analyzing", 30, "Analyzing issue...", issue_number=issue_number
@@ -126,7 +136,7 @@ class AutoFixProcessor:
             # via the existing investigation flow
 
             state.update_status(AutoFixStatus.CREATING_SPEC)
-            state.save(self.github_dir)
+            await state.save(self.github_dir)
 
             self._report_progress(
                 "complete", 100, "Ready for spec creation", issue_number=issue_number
@@ -137,7 +147,7 @@ class AutoFixProcessor:
             if state:
                 state.status = AutoFixStatus.FAILED
                 state.error = str(e)
-                state.save(self.github_dir)
+                await state.save(self.github_dir)
             raise
 
     async def get_queue(self) -> list[AutoFixState]:

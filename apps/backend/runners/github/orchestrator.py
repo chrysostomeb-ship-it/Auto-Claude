@@ -331,7 +331,7 @@ class GitHubOrchestrator:
                     summary=f"Skipped review: {skip_reason}",
                     overall_status="comment",
                 )
-                result.save(self.github_dir)
+                await result.save(self.github_dir)
                 return result
 
             self._report_progress(
@@ -434,7 +434,7 @@ class GitHubOrchestrator:
                     await self._post_ai_triage_replies(pr_number, ai_triages)
 
             # Save result
-            result.save(self.github_dir)
+            await result.save(self.github_dir)
 
             # Mark as reviewed
             head_sha = self.bot_detector.get_last_commit_sha(pr_context.commits)
@@ -453,7 +453,7 @@ class GitHubOrchestrator:
                 success=False,
                 error=str(e),
             )
-            result.save(self.github_dir)
+            await result.save(self.github_dir)
             return result
 
     def _generate_verdict(
@@ -723,7 +723,7 @@ class GitHubOrchestrator:
                     print(f"Failed to apply labels to #{issue['number']}: {e}")
 
             # Save result
-            result.save(self.github_dir)
+            await result.save(self.github_dir)
 
         self._report_progress("complete", 100, f"Triaged {len(results)} issues")
         return results

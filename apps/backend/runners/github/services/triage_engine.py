@@ -39,7 +39,17 @@ class TriageEngine:
     def _report_progress(self, phase: str, progress: int, message: str, **kwargs):
         """Report progress if callback is set."""
         if self.progress_callback:
-            from ..orchestrator import ProgressCallback
+            # Import at module level to avoid circular import issues
+            import sys
+
+            if "orchestrator" in sys.modules:
+                ProgressCallback = sys.modules["orchestrator"].ProgressCallback
+            else:
+                # Fallback: try relative import
+                try:
+                    from ..orchestrator import ProgressCallback
+                except ImportError:
+                    from orchestrator import ProgressCallback
 
             self.progress_callback(
                 ProgressCallback(

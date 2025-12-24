@@ -284,15 +284,16 @@ class PRContextGatherer:
             return ""
 
     async def _get_file_patch(self, path: str) -> str:
-        """Get the diff patch for a specific file."""
-        try:
-            result = await self.gh_client.run(
-                ["pr", "diff", str(self.pr_number), "--", path],
-                raise_on_error=False,
-            )
-            return result.stdout
-        except Exception:
-            return ""
+        """Get the diff patch for a specific file.
+
+        Note: We don't fetch individual file patches as `gh pr diff` doesn't support
+        file filtering. The full diff is fetched separately and individual file diffs
+        can be extracted from the ChangedFile.patch field if needed.
+        """
+        # gh pr diff doesn't support file filtering, so we return empty here
+        # The full diff is available via _fetch_pr_diff() and file-level patches
+        # are populated when we parse the PR files API response
+        return ""
 
     async def _fetch_pr_diff(self) -> str:
         """Fetch complete PR diff from GitHub."""
