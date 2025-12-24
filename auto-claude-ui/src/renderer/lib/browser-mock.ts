@@ -1,12 +1,13 @@
 /**
- * Browser mock for window.electronAPI
- * This allows the app to run in a regular browser for UI development/testing
+ * Browser mock / Web API for window.electronAPI
  *
- * This module aggregates all mock implementations from separate modules
- * for better code organization and maintainability.
+ * When running in web mode (not Electron), this module provides:
+ * - Real HTTP/WebSocket API if connected to the web server
+ * - Mock API for standalone UI development
  */
 
 import type { ElectronAPI } from '../../shared/types';
+import webAPI from './web-api';
 import {
   projectMock,
   taskMock,
@@ -21,8 +22,13 @@ import {
   settingsMock
 } from './mocks';
 
-// Check if we're in a browser (not Electron)
+// Check if we're in Electron
 const isElectron = typeof window !== 'undefined' && window.electronAPI !== undefined;
+
+// Check if we're connected to the web server (not just file:// or localhost dev)
+const isWebServerMode = typeof window !== 'undefined' &&
+  !isElectron &&
+  (window.location.port === '8080' || window.location.pathname.startsWith('/api'));
 
 /**
  * Create mock electronAPI for browser
@@ -112,10 +118,20 @@ const browserMockAPI: ElectronAPI = {
 };
 
 /**
- * Initialize browser mock if not running in Electron
+ * Initialize browser mock or web API if not running in Electron
  */
 export function initBrowserMock(): void {
-  if (!isElectron) {
+  if (isElectron) {
+    // Running in Electron, electronAPI already provided by preload
+    return;
+  }
+
+  if (isWebServerMode) {
+    // Running in web server mode - use real HTTP/WebSocket API
+    console.log('%c[Web API] Initializing real web API (HTTP/WebSocket)', 'color: #28a745; font-weight: bold;');
+    (window as Window & { electronAPI: ElectronAPI }).electronAPI = webAPI;
+  } else {
+    // Running in standalone browser - use mocks for UI development
     console.warn('%c[Browser Mock] Initializing mock electronAPI for browser preview', 'color: #f0ad4e; font-weight: bold;');
     (window as Window & { electronAPI: ElectronAPI }).electronAPI = browserMockAPI;
   }

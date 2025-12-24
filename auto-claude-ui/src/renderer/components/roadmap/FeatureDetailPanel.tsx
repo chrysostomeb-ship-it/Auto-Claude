@@ -114,13 +114,13 @@ export function FeatureDetailPanel({
             <div className="text-xs text-muted-foreground">Impact</div>
           </Card>
           <Card className="p-3 text-center">
-            <div className="text-lg font-semibold">{feature.dependencies.length}</div>
+            <div className="text-lg font-semibold">{feature.dependencies?.length || 0}</div>
             <div className="text-xs text-muted-foreground">Dependencies</div>
           </Card>
         </div>
 
         {/* User Stories */}
-        {feature.userStories.length > 0 && (
+        {feature.userStories && feature.userStories.length > 0 && (
           <div>
             <h3 className="text-sm font-medium mb-2 flex items-center gap-2">
               <Users className="h-4 w-4" />
@@ -137,7 +137,7 @@ export function FeatureDetailPanel({
         )}
 
         {/* Acceptance Criteria */}
-        {feature.acceptanceCriteria.length > 0 && (
+        {feature.acceptanceCriteria && feature.acceptanceCriteria.length > 0 && (
           <div>
             <h3 className="text-sm font-medium mb-2 flex items-center gap-2">
               <CheckCircle2 className="h-4 w-4" />
@@ -155,7 +155,7 @@ export function FeatureDetailPanel({
         )}
 
         {/* Dependencies */}
-        {feature.dependencies.length > 0 && (
+        {feature.dependencies && feature.dependencies.length > 0 && (
           <div>
             <h3 className="text-sm font-medium mb-2 flex items-center gap-2">
               <ArrowRight className="h-4 w-4" />
