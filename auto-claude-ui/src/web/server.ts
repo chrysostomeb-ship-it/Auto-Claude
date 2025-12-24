@@ -1064,6 +1064,27 @@ app.post('/api/roadmap/features/:featureId/convert', (req, res) => {
       return res.json({ success: false, error: 'Feature not found' });
     }
 
+    // Check if feature was already converted - return existing spec info
+    if (feature.linked_spec_id) {
+      const existingSpecDir = path.join(project.path, '.auto-claude', 'specs', feature.linked_spec_id);
+      if (existsSync(existingSpecDir)) {
+        return res.json({
+          success: true,
+          data: {
+            id: feature.linked_spec_id,
+            specId: feature.linked_spec_id,
+            projectId: projectId as string,
+            title: feature.title,
+            description: feature.description,
+            status: 'backlog',
+            alreadyExists: true
+          }
+        });
+      }
+      // If spec dir doesn't exist, clear the linked_spec_id and proceed with new conversion
+      feature.linked_spec_id = undefined;
+    }
+
     // Build task description from feature (match Electron format)
     const taskDescription = `# ${feature.title}
 
