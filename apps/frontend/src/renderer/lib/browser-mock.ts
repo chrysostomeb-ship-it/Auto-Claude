@@ -150,6 +150,7 @@ const browserMockAPI: ElectronAPI = {
     mergePR: async () => true,
     assignPR: async () => true,
     getPRReview: async () => null,
+    deletePRReview: async () => true,
     onPRReviewProgress: () => () => {},
     onPRReviewComplete: () => () => {},
     onPRReviewError: () => () => {},

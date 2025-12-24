@@ -510,9 +510,13 @@ export function registerPRHandlers(
           return false;
         }
 
-        try {
-          const { execSync } = await import('child_process');
+        const config = getGitHubConfig(project);
+        if (!config) {
+          debugLog('No GitHub config found');
+          return false;
+        }
 
+        try {
           // Filter findings if selection provided
           const selectedSet = selectedFindingIds ? new Set(selectedFindingIds) : null;
           const findings = selectedSet
@@ -555,31 +559,41 @@ export function registerPRHandlers(
             overallStatus = hasBlocker ? 'request_changes' : (findings.length > 0 ? 'comment' : 'approve');
           }
 
-          // Post review
-          const eventFlag = overallStatus === 'approve' ? '--approve' :
-            overallStatus === 'request_changes' ? '--request-changes' : '--comment';
+          // Map to GitHub API event type
+          const event = overallStatus === 'approve' ? 'APPROVE' :
+            overallStatus === 'request_changes' ? 'REQUEST_CHANGES' : 'COMMENT';
 
-          debugLog('Posting review to GitHub', { prNumber, status: overallStatus, findingsCount: findings.length });
+          debugLog('Posting review to GitHub', { prNumber, status: overallStatus, event, findingsCount: findings.length });
 
-          // Use temp file to avoid shell escaping issues with special characters
-          const { writeFileSync, unlinkSync } = await import('fs');
-          const { join } = await import('path');
-          const tmpFile = join(project.path, '.auto-claude', 'tmp_review_body.txt');
-          try {
-            writeFileSync(tmpFile, body, 'utf-8');
-            execSync(`gh pr review ${prNumber} ${eventFlag} --body-file "${tmpFile}"`, {
-              cwd: project.path,
-            });
-            unlinkSync(tmpFile); // Clean up temp file
-          } catch (error) {
-            // Clean up temp file even on error
-            try { unlinkSync(tmpFile); } catch {
-              // Ignore cleanup errors
+          // Post review via GitHub API to capture review ID
+          const reviewResponse = await githubFetch(
+            config.token,
+            `/repos/${config.repo}/pulls/${prNumber}/reviews`,
+            {
+              method: 'POST',
+              body: JSON.stringify({
+                body,
+                event,
+              }),
             }
-            throw error;
+          ) as { id: number };
+
+          const reviewId = reviewResponse.id;
+          debugLog('Review posted successfully', { prNumber, reviewId });
+
+          // Update the stored review result with the review ID
+          const reviewPath = path.join(getGitHubDir(project), 'pr', `review_${prNumber}.json`);
+          if (fs.existsSync(reviewPath)) {
+            try {
+              const data = JSON.parse(fs.readFileSync(reviewPath, 'utf-8'));
+              data.review_id = reviewId;
+              fs.writeFileSync(reviewPath, JSON.stringify(data, null, 2), 'utf-8');
+              debugLog('Updated review result with review ID', { prNumber, reviewId });
+            } catch (error) {
+              debugLog('Failed to update review result file', { error: error instanceof Error ? error.message : error });
+            }
           }
 
-          debugLog('Review posted successfully', { prNumber });
           return true;
         } catch (error) {
           debugLog('Failed to post review', { prNumber, error: error instanceof Error ? error.message : error });
@@ -626,6 +640,61 @@ export function registerPRHandlers(
         }
       });
       return postResult ?? false;
+    }
+  );
+
+  // Delete review from PR
+  ipcMain.handle(
+    IPC_CHANNELS.GITHUB_PR_DELETE_REVIEW,
+    async (_, projectId: string, prNumber: number): Promise<boolean> => {
+      debugLog('deletePRReview handler called', { projectId, prNumber });
+      const deleteResult = await withProjectOrNull(projectId, async (project) => {
+        const result = getReviewResult(project, prNumber);
+        if (!result || !result.reviewId) {
+          debugLog('No review ID found for deletion', { prNumber });
+          return false;
+        }
+
+        const config = getGitHubConfig(project);
+        if (!config) {
+          debugLog('No GitHub config found');
+          return false;
+        }
+
+        try {
+          debugLog('Deleting review from GitHub', { prNumber, reviewId: result.reviewId });
+
+          // Delete review via GitHub API
+          await githubFetch(
+            config.token,
+            `/repos/${config.repo}/pulls/${prNumber}/reviews/${result.reviewId}`,
+            {
+              method: 'DELETE',
+            }
+          );
+
+          debugLog('Review deleted successfully', { prNumber, reviewId: result.reviewId });
+
+          // Clear the review ID from the stored result
+          const reviewPath = path.join(getGitHubDir(project), 'pr', `review_${prNumber}.json`);
+          if (fs.existsSync(reviewPath)) {
+            try {
+              const data = JSON.parse(fs.readFileSync(reviewPath, 'utf-8'));
+              delete data.review_id;
+              fs.writeFileSync(reviewPath, JSON.stringify(data, null, 2), 'utf-8');
+              debugLog('Cleared review ID from result file', { prNumber });
+            } catch (error) {
+              debugLog('Failed to update review result file', { error: error instanceof Error ? error.message : error });
+            }
+          }
+
+          return true;
+        } catch (error) {
+          debugLog('Failed to delete review', { prNumber, error: error instanceof Error ? error.message : error });
+          return false;
+        }
+      });
+      return deleteResult ?? false;
     }
   );
 

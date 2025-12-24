@@ -221,6 +221,44 @@ Dual-layer memory architecture:
   - Embedders: OpenAI, Voyage AI, Azure OpenAI, Ollama, Google AI
 - Configure with provider credentials in `.env.example`
 
+## Development Guidelines
+
+### Frontend Internationalization (i18n)
+
+**CRITICAL: Always use i18n translation keys for all user-facing text in the frontend.**
+
+The frontend uses `react-i18next` for internationalization. All labels, buttons, messages, and user-facing text MUST use translation keys.
+
+**Translation file locations:**
+- `apps/frontend/src/shared/i18n/locales/en/*.json` - English translations
+- `apps/frontend/src/shared/i18n/locales/fr/*.json` - French translations
+
+**Translation namespaces:**
+- `common.json` - Shared labels, buttons, common terms
+- `navigation.json` - Sidebar navigation items, sections
+- `settings.json` - Settings page content
+- `dialogs.json` - Dialog boxes and modals
+- `tasks.json` - Task/spec related content
+- `onboarding.json` - Onboarding wizard content
+- `welcome.json` - Welcome screen content
+
+**Usage pattern:**
+```tsx
+import { useTranslation } from 'react-i18next';
+
+// In component
+const { t } = useTranslation(['navigation', 'common']);
+
+// Use translation keys, NOT hardcoded strings
+<span>{t('navigation:items.githubPRs')}</span>  // ✅ CORRECT
+<span>GitHub PRs</span>                          // ❌ WRONG
+```
+
+**When adding new UI text:**
+1. Add the translation key to ALL language files (at minimum: `en/*.json` and `fr/*.json`)
+2. Use `namespace:section.key` format (e.g., `navigation:items.githubPRs`)
+3. Never use hardcoded strings in JSX/TSX files
+
 ## Project Structure
 
 ```
