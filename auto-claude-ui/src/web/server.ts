@@ -664,10 +664,33 @@ app.post('/api/tasks/:id/start', (req, res) => {
     projectPath: project.path
   });
 
+  // Broadcast status change to 'in_progress' when task starts
+  broadcast('task:statusChange', { taskId, status: 'in_progress' });
+
   child.stdout?.on('data', (data) => {
     const log = data.toString();
     console.log('[Task stdout]', taskId, log.substring(0, 200));
     broadcast('task:log', { taskId, log });
+
+    // Parse task log markers for progress updates
+    if (log.includes('__TASK_LOG_PHASE_START__')) {
+      try {
+        const match = log.match(/__TASK_LOG_PHASE_START__:(\{.*\})/);
+        if (match) {
+          const phaseData = JSON.parse(match[1]);
+          broadcast('task:executionProgress', { taskId, progress: { phase: phaseData.phase, status: 'running' } });
+        }
+      } catch { /* ignore parse errors */ }
+    }
+    if (log.includes('__TASK_LOG_PHASE_END__')) {
+      try {
+        const match = log.match(/__TASK_LOG_PHASE_END__:(\{.*\})/);
+        if (match) {
+          const phaseData = JSON.parse(match[1]);
+          broadcast('task:executionProgress', { taskId, progress: { phase: phaseData.phase, status: phaseData.success ? 'completed' : 'failed' } });
+        }
+      } catch { /* ignore parse errors */ }
+    }
   });
 
   child.stderr?.on('data', (data) => {
@@ -680,6 +703,8 @@ app.post('/api/tasks/:id/start', (req, res) => {
     console.log('[Task exit]', taskId, 'code:', code);
     runningTasks.delete(taskId);
     broadcast('task:exit', { taskId, code });
+    // Broadcast status change when task completes
+    broadcast('task:statusChange', { taskId, status: code === 0 ? 'review' : 'failed' });
   });
 
   res.json({ success: true });
@@ -692,9 +717,18 @@ app.post('/api/tasks/:id/stop', (req, res) => {
   if (task) {
     task.process.kill();
     runningTasks.delete(taskId);
+    // Broadcast status change when task is stopped
+    broadcast('task:statusChange', { taskId, status: 'stopped' });
   }
 
   res.json({ success: true });
+});
+
+// Get task running status
+app.get('/api/tasks/:id/status', (req, res) => {
+  const taskId = req.params.id;
+  const isRunning = runningTasks.has(taskId);
+  res.json({ success: true, data: { running: isRunning } });
 });
 
 app.post('/api/tasks/:id/recover', (req, res) => {
