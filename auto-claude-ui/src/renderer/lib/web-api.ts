@@ -127,8 +127,8 @@ export const webAPI: ElectronAPI = {
     request('POST', `/tasks/${taskId}/review`, { projectId: currentProjectId, approved, feedback }),
   updateTaskStatus: (taskId: string, status: string) =>
     request('PATCH', `/tasks/${taskId}/status`, { projectId: currentProjectId, status }),
-  archiveTasks: (projectId: string, taskIds: string[]) =>
-    request('POST', '/tasks/archive', { projectId, taskIds }),
+  archiveTasks: (projectId: string, taskIds: string[], version?: string) =>
+    request('POST', '/tasks/archive', { projectId, taskIds, version }),
   unarchiveTasks: (projectId: string, taskIds: string[]) =>
     request('POST', '/tasks/unarchive', { projectId, taskIds }),
 
