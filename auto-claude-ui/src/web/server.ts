@@ -1112,6 +1112,9 @@ ${(feature.acceptance_criteria || []).map((c: string) => `- [ ] ${c}`).join('\n'
     const specDir = path.join(specsDir, specId);
     mkdirSync(specDir, { recursive: true });
 
+    // Create spec.md (REQUIRED by run.py to recognize the spec)
+    writeFileSync(path.join(specDir, 'spec.md'), taskDescription);
+
     // Create implementation_plan.json
     const now = new Date().toISOString();
     const implementationPlan = {
