@@ -631,8 +631,8 @@ app.post('/api/tasks/:id/start', (req, res) => {
   const pythonPath = path.join(autoBuildPath, '.venv', 'bin', 'python');
   const runScript = path.join(autoBuildPath, 'run.py');
 
-  // Build command args
-  const args = [runScript, '--spec', taskId];
+  // Build command args - always use --auto-continue for non-interactive mode
+  const args = [runScript, '--spec', taskId, '--auto-continue'];
 
   // Add --force flag if requested (bypasses review approval check)
   if (options?.force) {
