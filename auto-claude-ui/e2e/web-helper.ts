@@ -5,6 +5,7 @@
 import { Page, expect } from '@playwright/test';
 import { mkdirSync, rmSync, existsSync, writeFileSync } from 'fs';
 import path from 'path';
+import WebSocket from 'ws';
 
 const API_BASE = 'http://localhost:8080/api';
 
@@ -258,19 +259,20 @@ export class WebSocketHelper {
   async connect(): Promise<void> {
     return new Promise((resolve, reject) => {
       this.ws = new WebSocket('ws://localhost:8080/ws');
-      this.ws.onopen = () => resolve();
-      this.ws.onerror = (err) => reject(err);
-      this.ws.onmessage = (event) => {
+      this.ws.on('open', () => resolve());
+      this.ws.on('error', (err) => reject(err));
+      this.ws.on('message', (data) => {
         try {
-          const { event: eventName, data } = JSON.parse(event.data);
+          const msg = JSON.parse(data.toString());
+          const { event: eventName, data: eventData } = msg;
           if (!this.events.has(eventName)) {
             this.events.set(eventName, []);
           }
-          this.events.get(eventName)!.push(data);
+          this.events.get(eventName)!.push(eventData);
         } catch {
           // Ignore parse errors
         }
-      };
+      });
     });
   }
 

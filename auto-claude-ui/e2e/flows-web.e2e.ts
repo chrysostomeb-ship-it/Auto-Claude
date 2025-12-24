@@ -13,6 +13,7 @@ import {
   api,
   TEST_PROJECT_DIR,
   waitForAppReady,
+  WebSocketHelper,
 } from './web-helper';
 
 // Setup/teardown for all tests
@@ -311,6 +312,93 @@ test.describe('E2E: Roadmap to Task Flow', () => {
     const tasks = tasksResult.data as Array<{ title: string }>;
     const convertedTask = tasks.find((t) => t.title === 'Test Feature 1');
     expect(convertedTask).toBeDefined();
+  });
+});
+
+// ============================================
+// Full Task Lifecycle Test (Real Execution)
+// ============================================
+
+test.describe('E2E: Full Task Lifecycle', () => {
+  test('should execute task and receive WebSocket updates', async () => {
+    // Use real project with auto-claude installed
+    const PROJECT_PATH = '/home/devuser/workdir/stack-live-context';
+
+    // Add project
+    const projectResult = await api.post('/projects', { path: PROJECT_PATH });
+    expect(projectResult.success).toBe(true);
+    const projectId = (projectResult.data as { id: string }).id;
+
+    // Create a simple task
+    const taskResult = await api.post('/tasks', {
+      projectId,
+      title: 'E2E Lifecycle Test',
+      description: 'Create a file called e2e-lifecycle-test.txt with content "Test passed"',
+    });
+    expect(taskResult.success).toBe(true);
+    const taskId = (taskResult.data as { id: string }).id;
+    console.log('Created task:', taskId);
+
+    // Connect to WebSocket to monitor events
+    const wsHelper = new WebSocketHelper();
+    await wsHelper.connect();
+    console.log('WebSocket connected');
+
+    // Start the task with force flag
+    const startResult = await api.post(`/tasks/${taskId}/start`, {
+      projectId,
+      options: { force: true },
+    });
+    expect(startResult.success).toBe(true);
+    console.log('Task started');
+
+    // Check running status immediately
+    const statusResult = await api.get(`/tasks/${taskId}/status`);
+    console.log('Running status:', statusResult);
+
+    // Wait for task:statusChange event (max 30 seconds)
+    let statusChangeReceived = false;
+    const startTime = Date.now();
+    while (Date.now() - startTime < 30000) {
+      const statusEvents = wsHelper.getEvents('task:statusChange');
+      const matchingEvent = statusEvents.find(
+        (e) => (e as { taskId: string }).taskId === taskId
+      );
+      if (matchingEvent) {
+        statusChangeReceived = true;
+        console.log('Status change received:', matchingEvent);
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    expect(statusChangeReceived).toBe(true);
+
+    // Wait for some logs (max 60 seconds)
+    let logsReceived = false;
+    const logStartTime = Date.now();
+    while (Date.now() - logStartTime < 60000) {
+      const logEvents = wsHelper.getEvents('task:log');
+      const matchingLogs = logEvents.filter(
+        (e) => (e as { taskId: string }).taskId === taskId
+      );
+      if (matchingLogs.length > 0) {
+        logsReceived = true;
+        console.log(`Received ${matchingLogs.length} log events`);
+        // Print first log for debugging
+        const firstLog = matchingLogs[0] as { log: string };
+        console.log('First log:', firstLog.log?.substring(0, 200));
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+    expect(logsReceived).toBe(true);
+
+    // Stop the task (don't wait for full completion in test)
+    await api.post(`/tasks/${taskId}/stop`, { projectId });
+    console.log('Task stopped');
+
+    // Cleanup
+    wsHelper.close();
   });
 });
 
