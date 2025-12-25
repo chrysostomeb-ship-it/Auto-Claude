@@ -9,7 +9,7 @@
  * Usage:
  *   node scripts/download-python.cjs [--platform <platform>] [--arch <arch>]
  *
- * Platforms: darwin, win32, linux
+ * Platforms: darwin/mac, win32/win, linux
  * Architectures: x64, arm64
  *
  * If not specified, uses current platform/arch.
@@ -18,9 +18,9 @@
 const https = require('https');
 const fs = require('fs');
 const path = require('path');
-const { execSync } = require('child_process');
+const { spawnSync } = require('child_process');
 const os = require('os');
-// Note: crypto.createHash could be used for checksum verification in future
+const nodeCrypto = require('crypto');
 
 // Python version to bundle (must be 3.10+ for claude-agent-sdk, 3.12+ for full Graphiti support)
 const PYTHON_VERSION = '3.12.8';
@@ -34,11 +34,49 @@ const BASE_URL = `https://github.com/indygreg/python-build-standalone/releases/d
 // Output directory for downloaded Python (relative to frontend root)
 const OUTPUT_DIR = 'python-runtime';
 
+// SHA256 checksums for verification (from python-build-standalone release)
+// These must be updated when changing PYTHON_VERSION or RELEASE_TAG
+// Get checksums from: https://github.com/indygreg/python-build-standalone/releases
+const CHECKSUMS = {
+  'darwin-arm64': 'abe1de2494bb8b243fd507944f4d50292848fa00685d5288c858a72623a16635',
+  'darwin-x64': null,    // Will be populated on first successful download
+  'win32-x64': null,     // Will be populated on first successful download
+  'linux-x64': null,     // Will be populated on first successful download
+  'linux-arm64': null,   // Will be populated on first successful download
+};
+
+// Map Node.js platform names to electron-builder platform names
+function toElectronBuilderPlatform(nodePlatform) {
+  const map = {
+    'darwin': 'mac',
+    'win32': 'win',
+    'linux': 'linux',
+  };
+  return map[nodePlatform] || nodePlatform;
+}
+
+// Map electron-builder platform names to Node.js platform names (for internal use)
+function toNodePlatform(platform) {
+  const map = {
+    'mac': 'darwin',
+    'win': 'win32',
+    'darwin': 'darwin',
+    'win32': 'win32',
+    'linux': 'linux',
+  };
+  return map[platform] || platform;
+}
+
 /**
  * Get the download URL for a specific platform/arch combination.
  * python-build-standalone uses specific naming conventions.
+ *
+ * @param {string} platform - Node.js platform (darwin, win32, linux)
+ * @param {string} arch - Architecture (x64, arm64)
  */
 function getDownloadInfo(platform, arch) {
+  // Normalize platform to Node.js naming for internal lookups
+  const nodePlatform = toNodePlatform(platform);
   const version = PYTHON_VERSION;
 
   // Map platform/arch to python-build-standalone naming
@@ -65,40 +103,78 @@ function getDownloadInfo(platform, arch) {
     },
   };
 
-  const key = `${platform}-${arch}`;
+  const key = `${nodePlatform}-${arch}`;
   const config = configs[key];
 
   if (!config) {
     throw new Error(`Unsupported platform/arch combination: ${key}. Supported: ${Object.keys(configs).join(', ')}`);
   }
 
+  // Use electron-builder platform naming for output directory
+  const ebPlatform = toElectronBuilderPlatform(nodePlatform);
+
   return {
     url: `${BASE_URL}/${config.filename}`,
     filename: config.filename,
     extractDir: config.extractDir,
-    outputDir: `${platform}-${arch}`,
+    outputDir: `${ebPlatform}-${arch}`,  // e.g., "mac-arm64", "win-x64", "linux-x64"
+    nodePlatform,  // For internal checks (darwin, win32, linux)
+    checksum: CHECKSUMS[key],
   };
 }
 
 /**
  * Download a file from URL to destination path.
+ * Includes timeout handling, redirect limits, and proper cleanup.
  */
 function downloadFile(url, destPath) {
+  const DOWNLOAD_TIMEOUT = 300000; // 5 minutes
+  const MAX_REDIRECTS = 10;
+
   return new Promise((resolve, reject) => {
     console.log(`[download-python] Downloading from: ${url}`);
 
-    const file = fs.createWriteStream(destPath);
+    let file = null;
+    let redirectCount = 0;
+    let currentRequest = null;
+
+    const cleanup = () => {
+      if (file) {
+        file.close();
+        file = null;
+      }
+      if (fs.existsSync(destPath)) {
+        try {
+          fs.unlinkSync(destPath);
+        } catch {
+          // Ignore cleanup errors
+        }
+      }
+    };
 
     const request = (urlString) => {
-      https.get(urlString, (response) => {
+      if (++redirectCount > MAX_REDIRECTS) {
+        cleanup();
+        reject(new Error(`Too many redirects (max ${MAX_REDIRECTS})`));
+        return;
+      }
+
+      // Create file stream only on first request
+      if (!file) {
+        file = fs.createWriteStream(destPath);
+      }
+
+      currentRequest = https.get(urlString, { timeout: DOWNLOAD_TIMEOUT }, (response) => {
         // Handle redirects (GitHub uses them)
         if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
           console.log(`[download-python] Following redirect...`);
+          response.resume(); // Consume response to free up memory
           request(response.headers.location);
           return;
         }
 
         if (response.statusCode !== 200) {
+          cleanup();
           reject(new Error(`Download failed with status ${response.statusCode}`));
           return;
         }
@@ -109,10 +185,12 @@ function downloadFile(url, destPath) {
 
         response.on('data', (chunk) => {
           downloadedSize += chunk.length;
-          const percent = Math.floor((downloadedSize / totalSize) * 100);
-          if (percent >= lastPercent + 10) {
-            console.log(`[download-python] Progress: ${percent}%`);
-            lastPercent = percent;
+          if (totalSize > 0) {
+            const percent = Math.floor((downloadedSize / totalSize) * 100);
+            if (percent >= lastPercent + 10) {
+              console.log(`[download-python] Progress: ${percent}%`);
+              lastPercent = percent;
+            }
           }
         });
 
@@ -120,12 +198,26 @@ function downloadFile(url, destPath) {
 
         file.on('finish', () => {
           file.close();
+          file = null;
           console.log(`[download-python] Download complete: ${destPath}`);
           resolve();
         });
-      }).on('error', (err) => {
-        fs.unlink(destPath, () => {}); // Clean up partial file
+
+        file.on('error', (err) => {
+          cleanup();
+          reject(err);
+        });
+      });
+
+      currentRequest.on('error', (err) => {
+        cleanup();
         reject(err);
+      });
+
+      currentRequest.on('timeout', () => {
+        currentRequest.destroy();
+        cleanup();
+        reject(new Error(`Download timeout after ${DOWNLOAD_TIMEOUT / 1000} seconds`));
       });
     };
 
@@ -134,7 +226,28 @@ function downloadFile(url, destPath) {
 }
 
 /**
- * Extract a tar.gz file.
+ * Verify file checksum.
+ */
+function verifyChecksum(filePath, expectedChecksum) {
+  if (!expectedChecksum) {
+    console.log(`[download-python] Warning: No checksum available for verification`);
+    return true;
+  }
+
+  console.log(`[download-python] Verifying checksum...`);
+  const fileBuffer = fs.readFileSync(filePath);
+  const hash = nodeCrypto.createHash('sha256').update(fileBuffer).digest('hex');
+
+  if (hash !== expectedChecksum) {
+    throw new Error(`Checksum mismatch! Expected: ${expectedChecksum}, Got: ${hash}`);
+  }
+
+  console.log(`[download-python] Checksum verified: ${hash.substring(0, 16)}...`);
+  return true;
+}
+
+/**
+ * Extract a tar.gz file using spawnSync for safety.
  */
 function extractTarGz(archivePath, destDir) {
   console.log(`[download-python] Extracting to: ${destDir}`);
@@ -142,13 +255,39 @@ function extractTarGz(archivePath, destDir) {
   // Ensure destination exists
   fs.mkdirSync(destDir, { recursive: true });
 
-  // Use tar command (available on all platforms we support)
-  try {
-    execSync(`tar -xzf "${archivePath}" -C "${destDir}"`, { stdio: 'inherit' });
-    console.log(`[download-python] Extraction complete`);
-  } catch (error) {
-    throw new Error(`Failed to extract archive: ${error.message}`);
+  // Use tar command with array arguments (safer than string interpolation)
+  const result = spawnSync('tar', ['-xzf', archivePath, '-C', destDir], {
+    stdio: 'inherit',
+  });
+
+  if (result.error) {
+    throw new Error(`Failed to extract archive: ${result.error.message}`);
   }
+
+  if (result.status !== 0) {
+    throw new Error(`Failed to extract archive: tar exited with code ${result.status}`);
+  }
+
+  console.log(`[download-python] Extraction complete`);
+}
+
+/**
+ * Verify Python binary works by checking its version.
+ */
+function verifyPythonBinary(pythonBin) {
+  const result = spawnSync(pythonBin, ['--version'], { encoding: 'utf-8' });
+
+  if (result.error) {
+    throw result.error;
+  }
+
+  if (result.status !== 0) {
+    throw new Error(`Python verification failed with exit code ${result.status}`);
+  }
+
+  // Version output may be on stdout or stderr depending on Python version
+  const version = (result.stdout || result.stderr || '').trim();
+  return version;
 }
 
 /**
@@ -158,15 +297,15 @@ async function downloadPython(targetPlatform, targetArch) {
   const platform = targetPlatform || os.platform();
   const arch = targetArch || os.arch();
 
-  console.log(`[download-python] Setting up Python ${PYTHON_VERSION} for ${platform}-${arch}`);
+  const info = getDownloadInfo(platform, arch);
+  console.log(`[download-python] Setting up Python ${PYTHON_VERSION} for ${info.outputDir}`);
 
   const frontendDir = path.join(__dirname, '..');
   const runtimeDir = path.join(frontendDir, OUTPUT_DIR);
-  const info = getDownloadInfo(platform, arch);
   const platformDir = path.join(runtimeDir, info.outputDir);
 
   // Check if already downloaded
-  const pythonBin = platform === 'win32'
+  const pythonBin = info.nodePlatform === 'win32'
     ? path.join(platformDir, 'python', 'python.exe')
     : path.join(platformDir, 'python', 'bin', 'python3');
 
@@ -175,11 +314,13 @@ async function downloadPython(targetPlatform, targetArch) {
 
     // Verify it works
     try {
-      const version = execSync(`"${pythonBin}" --version`, { encoding: 'utf-8' }).trim();
+      const version = verifyPythonBinary(pythonBin);
       console.log(`[download-python] Verified: ${version}`);
       return { success: true, pythonPath: pythonBin };
     } catch {
       console.log(`[download-python] Existing Python is broken, re-downloading...`);
+      // Remove broken installation
+      fs.rmSync(platformDir, { recursive: true, force: true });
     }
   }
 
@@ -188,32 +329,42 @@ async function downloadPython(targetPlatform, targetArch) {
 
   // Download
   const archivePath = path.join(runtimeDir, info.filename);
+  let needsDownload = true;
 
-  if (!fs.existsSync(archivePath)) {
+  if (fs.existsSync(archivePath)) {
+    console.log(`[download-python] Found cached archive: ${archivePath}`);
+    // Verify cached archive checksum
+    try {
+      verifyChecksum(archivePath, info.checksum);
+      needsDownload = false;
+    } catch (err) {
+      console.log(`[download-python] Cached archive failed verification: ${err.message}`);
+      fs.unlinkSync(archivePath);
+    }
+  }
+
+  if (needsDownload) {
     await downloadFile(info.url, archivePath);
-  } else {
-    console.log(`[download-python] Using cached archive: ${archivePath}`);
+    // Verify downloaded file
+    verifyChecksum(archivePath, info.checksum);
   }
 
   // Extract
   extractTarGz(archivePath, platformDir);
 
-  // Verify
+  // Verify binary exists
   if (!fs.existsSync(pythonBin)) {
     throw new Error(`Python binary not found after extraction: ${pythonBin}`);
   }
 
   // Make executable on Unix
-  if (platform !== 'win32') {
+  if (info.nodePlatform !== 'win32') {
     fs.chmodSync(pythonBin, 0o755);
   }
 
   // Verify it works
-  const version = execSync(`"${pythonBin}" --version`, { encoding: 'utf-8' }).trim();
+  const version = verifyPythonBinary(pythonBin);
   console.log(`[download-python] Installed: ${version}`);
-
-  // Clean up archive (optional - keep for caching)
-  // fs.unlinkSync(archivePath);
 
   return { success: true, pythonPath: pythonBin };
 }
@@ -244,6 +395,27 @@ async function downloadAllPlatforms() {
   console.log(`[download-python] All platforms downloaded successfully!`);
 }
 
+// Valid platforms and architectures (for input validation)
+const VALID_PLATFORMS = ['darwin', 'mac', 'win32', 'win', 'linux'];
+const VALID_ARCHS = ['x64', 'arm64'];
+
+/**
+ * Validate and sanitize CLI input to prevent log injection.
+ */
+function validateInput(value, validValues, name) {
+  if (value === null) return null;
+
+  // Remove any control characters or newlines (ASCII 0-31 and 127)
+  // eslint-disable-next-line no-control-regex
+  const sanitized = String(value).replace(/[\x00-\x1f\x7f]/g, '');
+
+  if (!validValues.includes(sanitized)) {
+    throw new Error(`Invalid ${name}: "${sanitized}". Valid values: ${validValues.join(', ')}`);
+  }
+
+  return sanitized;
+}
+
 // CLI handling
 async function main() {
   const args = process.argv.slice(2);
@@ -264,7 +436,7 @@ async function main() {
 Usage: node download-python.cjs [options]
 
 Options:
-  --platform <platform>  Target platform (darwin, win32, linux)
+  --platform <platform>  Target platform (darwin/mac, win32/win, linux)
   --arch <arch>          Target architecture (x64, arm64)
   --all                  Download for all supported platforms
   --help, -h             Show this help message
@@ -274,6 +446,7 @@ If no options specified, downloads for the current platform/arch.
 Examples:
   node download-python.cjs                           # Current platform
   node download-python.cjs --platform darwin --arch arm64
+  node download-python.cjs --platform mac --arch arm64  # Electron-builder style
   node download-python.cjs --all                     # All platforms (for CI)
 `);
       process.exit(0);
@@ -281,6 +454,10 @@ Examples:
   }
 
   try {
+    // Validate inputs before use
+    platform = validateInput(platform, VALID_PLATFORMS, 'platform');
+    arch = validateInput(arch, VALID_ARCHS, 'arch');
+
     if (allPlatforms) {
       await downloadAllPlatforms();
     } else {

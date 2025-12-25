@@ -48,6 +48,8 @@ jobs:
         with:
           path: apps/frontend/python-runtime
           key: python-bundle-${{ runner.os }}-x64-3.12.8
+          restore-keys: |
+            python-bundle-${{ runner.os }}-x64-
 
       - name: Build application
         run: cd apps/frontend && npm run build
@@ -123,6 +125,8 @@ jobs:
         with:
           path: apps/frontend/python-runtime
           key: python-bundle-${{ runner.os }}-arm64-3.12.8
+          restore-keys: |
+            python-bundle-${{ runner.os }}-arm64-
 
       - name: Build application
         run: cd apps/frontend && npm run build
@@ -198,6 +202,8 @@ jobs:
         with:
           path: apps/frontend/python-runtime
           key: python-bundle-${{ runner.os }}-x64-3.12.8
+          restore-keys: |
+            python-bundle-${{ runner.os }}-x64-
 
       - name: Build application
         run: cd apps/frontend && npm run build
@@ -249,6 +255,8 @@ jobs:
         with:
           path: apps/frontend/python-runtime
           key: python-bundle-${{ runner.os }}-x64-3.12.8
+          restore-keys: |
+            python-bundle-${{ runner.os }}-x64-
 
       - name: Build application
         run: cd apps/frontend && npm run build

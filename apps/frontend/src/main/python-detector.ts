@@ -210,13 +210,24 @@ export function getDefaultPythonCommand(): string {
  *
  * @param pythonPath - The Python command string (e.g., "python3", "py -3", "/path/with spaces/python")
  * @returns Tuple of [command, baseArgs] ready for use with spawn()
+ * @throws Error if pythonPath is empty or only whitespace
  */
 export function parsePythonCommand(pythonPath: string): [string, string[]] {
   // Remove any surrounding quotes first
   let cleanPath = pythonPath.trim();
+
+  // Validate input is not empty
+  if (cleanPath === '') {
+    throw new Error('Python command cannot be empty');
+  }
+
   if ((cleanPath.startsWith('"') && cleanPath.endsWith('"')) ||
       (cleanPath.startsWith("'") && cleanPath.endsWith("'"))) {
     cleanPath = cleanPath.slice(1, -1);
+    // Validate again after quote removal
+    if (cleanPath === '') {
+      throw new Error('Python command cannot be empty');
+    }
   }
 
   // If the path points to an actual file, use it directly (handles paths with spaces)
@@ -238,8 +249,8 @@ export function parsePythonCommand(pythonPath: string): [string, string[]] {
   // Otherwise, split on spaces for commands like "py -3"
   const parts = cleanPath.split(' ').filter(p => p.length > 0);
   if (parts.length === 0) {
-    // Return empty string for empty input, not the original uncleaned path
-    return [cleanPath, []];
+    // This shouldn't happen after earlier validation, but guard anyway
+    throw new Error('Python command cannot be empty');
   }
   const command = parts[0];
   const baseArgs = parts.slice(1);
