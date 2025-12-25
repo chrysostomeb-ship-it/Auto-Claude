@@ -74,6 +74,26 @@ export interface PRReviewResult {
   reviewId?: number;
   reviewedAt: string;
   error?: string;
+  // Follow-up review fields
+  reviewedCommitSha?: string;
+  isFollowupReview?: boolean;
+  previousReviewId?: number;
+  resolvedFindings?: string[];
+  unresolvedFindings?: string[];
+  newFindingsSinceLastReview?: string[];
+  // Track if findings have been posted to GitHub (enables follow-up review)
+  hasPostedFindings?: boolean;
+  postedFindingIds?: string[];
+}
+
+/**
+ * Result of checking for new commits since last review
+ */
+export interface NewCommitsCheck {
+  hasNewCommits: boolean;
+  newCommitCount: number;
+  lastReviewedCommit?: string;
+  currentHeadCommit?: string;
 }
 
 /**
@@ -149,6 +169,16 @@ function getReviewResult(project: Project, prNumber: number): PRReviewResult | n
         reviewId: data.review_id,
         reviewedAt: data.reviewed_at ?? new Date().toISOString(),
         error: data.error,
+        // Follow-up review fields (snake_case -> camelCase)
+        reviewedCommitSha: data.reviewed_commit_sha,
+        isFollowupReview: data.is_followup_review ?? false,
+        previousReviewId: data.previous_review_id,
+        resolvedFindings: data.resolved_findings ?? [],
+        unresolvedFindings: data.unresolved_findings ?? [],
+        newFindingsSinceLastReview: data.new_findings_since_last_review ?? [],
+        // Track posted findings for follow-up review eligibility
+        hasPostedFindings: data.has_posted_findings ?? false,
+        postedFindingIds: data.posted_finding_ids ?? [],
       };
     } catch {
       return null;
@@ -642,14 +672,19 @@ export function registerPRHandlers(
           const reviewId = reviewResponse.id;
           debugLog('Review posted successfully', { prNumber, reviewId });
 
-          // Update the stored review result with the review ID
+          // Update the stored review result with the review ID and posted findings
           const reviewPath = path.join(getGitHubDir(project), 'pr', `review_${prNumber}.json`);
           if (fs.existsSync(reviewPath)) {
             try {
               const data = JSON.parse(fs.readFileSync(reviewPath, 'utf-8'));
               data.review_id = reviewId;
+              // Track posted findings to enable follow-up review
+              data.has_posted_findings = true;
+              const newPostedIds = findings.map(f => f.id);
+              const existingPostedIds = data.posted_finding_ids || [];
+              data.posted_finding_ids = [...new Set([...existingPostedIds, ...newPostedIds])];
               fs.writeFileSync(reviewPath, JSON.stringify(data, null, 2), 'utf-8');
-              debugLog('Updated review result with review ID', { prNumber, reviewId });
+              debugLog('Updated review result with review ID and posted findings', { prNumber, reviewId, postedCount: newPostedIds.length });
             } catch (error) {
               debugLog('Failed to update review result file', { error: error instanceof Error ? error.message : error });
             }
@@ -863,6 +898,207 @@ export function registerPRHandlers(
       } catch (error) {
         debugLog('Failed to cancel review', { reviewKey, error: error instanceof Error ? error.message : error });
         return false;
+      }
+    }
+  );
+
+  // Check for new commits since last review
+  ipcMain.handle(
+    IPC_CHANNELS.GITHUB_PR_CHECK_NEW_COMMITS,
+    async (_, projectId: string, prNumber: number): Promise<NewCommitsCheck> => {
+      debugLog('checkNewCommits handler called', { projectId, prNumber });
+
+      const result = await withProjectOrNull(projectId, async (project) => {
+        // Check if review exists and has reviewed_commit_sha
+        const githubDir = path.join(project.path, '.auto-claude', 'github');
+        const reviewPath = path.join(githubDir, 'pr', `review_${prNumber}.json`);
+
+        if (!fs.existsSync(reviewPath)) {
+          return { hasNewCommits: false, newCommitCount: 0 };
+        }
+
+        let review: PRReviewResult;
+        try {
+          const data = fs.readFileSync(reviewPath, 'utf-8');
+          review = JSON.parse(data);
+        } catch {
+          return { hasNewCommits: false, newCommitCount: 0 };
+        }
+
+        // Convert snake_case to camelCase for the field
+        const reviewedCommitSha = review.reviewedCommitSha || (review as any).reviewed_commit_sha;
+        if (!reviewedCommitSha) {
+          debugLog('No reviewedCommitSha in review', { prNumber });
+          return { hasNewCommits: false, newCommitCount: 0 };
+        }
+
+        // Get current PR HEAD
+        const config = getGitHubConfig(project);
+        if (!config) {
+          return { hasNewCommits: false, newCommitCount: 0 };
+        }
+
+        try {
+          // Get PR data to find current HEAD
+          const prData = (await githubFetch(
+            config.token,
+            `/repos/${config.repo}/pulls/${prNumber}`
+          )) as { head: { sha: string }; commits: number };
+
+          const currentHeadSha = prData.head.sha;
+
+          if (reviewedCommitSha === currentHeadSha) {
+            return {
+              hasNewCommits: false,
+              newCommitCount: 0,
+              lastReviewedCommit: reviewedCommitSha,
+              currentHeadCommit: currentHeadSha,
+            };
+          }
+
+          // Get comparison to count new commits
+          const comparison = (await githubFetch(
+            config.token,
+            `/repos/${config.repo}/compare/${reviewedCommitSha}...${currentHeadSha}`
+          )) as { ahead_by?: number; total_commits?: number };
+
+          return {
+            hasNewCommits: true,
+            newCommitCount: comparison.ahead_by || comparison.total_commits || 1,
+            lastReviewedCommit: reviewedCommitSha,
+            currentHeadCommit: currentHeadSha,
+          };
+        } catch (error) {
+          debugLog('Error checking new commits', { prNumber, error: error instanceof Error ? error.message : error });
+          return { hasNewCommits: false, newCommitCount: 0 };
+        }
+      });
+
+      return result ?? { hasNewCommits: false, newCommitCount: 0 };
+    }
+  );
+
+  // Run follow-up review
+  ipcMain.on(
+    IPC_CHANNELS.GITHUB_PR_FOLLOWUP_REVIEW,
+    async (_, projectId: string, prNumber: number) => {
+      debugLog('followupReview handler called', { projectId, prNumber });
+      const mainWindow = getMainWindow();
+      if (!mainWindow) {
+        debugLog('No main window available');
+        return;
+      }
+
+      try {
+        await withProjectOrNull(projectId, async (project) => {
+          const { sendProgress, sendError, sendComplete } = createIPCCommunicators<PRReviewProgress, PRReviewResult>(
+            mainWindow,
+            {
+              progress: IPC_CHANNELS.GITHUB_PR_REVIEW_PROGRESS,
+              error: IPC_CHANNELS.GITHUB_PR_REVIEW_ERROR,
+              complete: IPC_CHANNELS.GITHUB_PR_REVIEW_COMPLETE,
+            },
+            projectId
+          );
+
+          // Comprehensive validation of GitHub module
+          const validation = await validateGitHubModule(project);
+          if (!validation.valid) {
+            sendError({ prNumber, error: validation.error || 'GitHub module validation failed' });
+            return;
+          }
+
+          const backendPath = validation.backendPath!;
+          const reviewKey = getReviewKey(projectId, prNumber);
+
+          // Check if already running
+          if (runningReviews.has(reviewKey)) {
+            debugLog('Follow-up review already running', { reviewKey });
+            return;
+          }
+
+          debugLog('Starting follow-up review', { prNumber });
+          sendProgress({
+            phase: 'fetching',
+            prNumber,
+            progress: 5,
+            message: 'Starting follow-up review...',
+          });
+
+          const { model, thinkingLevel } = getGitHubPRSettings();
+          const args = buildRunnerArgs(
+            getRunnerPath(backendPath),
+            project.path,
+            'followup-review-pr',
+            [prNumber.toString()],
+            { model, thinkingLevel }
+          );
+
+          debugLog('Spawning follow-up review process', { args, model, thinkingLevel });
+
+          const { process: childProcess, promise } = runPythonSubprocess<PRReviewResult>({
+            pythonPath: getPythonPath(backendPath),
+            args,
+            cwd: backendPath,
+            onProgress: (percent, message) => {
+              debugLog('Progress update', { percent, message });
+              sendProgress({
+                phase: 'analyzing',
+                prNumber,
+                progress: percent,
+                message,
+              });
+            },
+            onStdout: (line) => debugLog('STDOUT:', line),
+            onStderr: (line) => debugLog('STDERR:', line),
+            onComplete: () => {
+              // Load the result from disk
+              const reviewResult = getReviewResult(project, prNumber);
+              if (!reviewResult) {
+                throw new Error('Follow-up review completed but result not found');
+              }
+              debugLog('Follow-up review result loaded', { findingsCount: reviewResult.findings.length });
+              return reviewResult;
+            },
+          });
+
+          // Register the running process
+          runningReviews.set(reviewKey, childProcess);
+          debugLog('Registered follow-up review process', { reviewKey, pid: childProcess.pid });
+
+          try {
+            const result = await promise;
+
+            if (!result.success) {
+              throw new Error(result.error ?? 'Follow-up review failed');
+            }
+
+            debugLog('Follow-up review completed', { prNumber, findingsCount: result.data?.findings.length });
+            sendProgress({
+              phase: 'complete',
+              prNumber,
+              progress: 100,
+              message: 'Follow-up review complete!',
+            });
+
+            sendComplete(result.data!);
+          } finally {
+            runningReviews.delete(reviewKey);
+            debugLog('Unregistered follow-up review process', { reviewKey });
+          }
+        });
+      } catch (error) {
+        debugLog('Follow-up review failed', { prNumber, error: error instanceof Error ? error.message : error });
+        const { sendError } = createIPCCommunicators<PRReviewProgress, PRReviewResult>(
+          mainWindow,
+          {
+            progress: IPC_CHANNELS.GITHUB_PR_REVIEW_PROGRESS,
+            error: IPC_CHANNELS.GITHUB_PR_REVIEW_ERROR,
+            complete: IPC_CHANNELS.GITHUB_PR_REVIEW_COMPLETE,
+          },
+          projectId
+        );
+        sendError({ prNumber, error: error instanceof Error ? error.message : 'Failed to run follow-up review' });
       }
     }
   );

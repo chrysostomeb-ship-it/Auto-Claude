@@ -21,11 +21,18 @@ import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 try:
     from .gh_client import GHClient, PRTooLargeError
 except (ImportError, ValueError, SystemError):
     from gh_client import GHClient, PRTooLargeError
+
+if TYPE_CHECKING:
+    try:
+        from .models import FollowupReviewContext, PRReviewResult
+    except (ImportError, ValueError, SystemError):
+        from models import FollowupReviewContext, PRReviewResult
 
 
 @dataclass
@@ -725,3 +732,166 @@ class PRContextGatherer:
             return {str(type_def)}
 
         return set()
+
+
+class FollowupContextGatherer:
+    """
+    Gathers context specifically for follow-up reviews.
+
+    Unlike the full PRContextGatherer, this only fetches:
+    - New commits since last review
+    - Changed files since last review
+    - New comments since last review
+    """
+
+    def __init__(
+        self,
+        project_dir: Path,
+        pr_number: int,
+        previous_review: PRReviewResult,  # Forward reference
+    ):
+        self.project_dir = Path(project_dir)
+        self.pr_number = pr_number
+        self.previous_review = previous_review
+        self.gh_client = GHClient(
+            project_dir=self.project_dir,
+            default_timeout=30.0,
+            max_retries=3,
+        )
+
+    async def gather(self) -> FollowupReviewContext:
+        """
+        Gather context for a follow-up review.
+
+        Returns:
+            FollowupReviewContext with changes since last review
+        """
+        # Import here to avoid circular imports
+        try:
+            from .models import FollowupReviewContext
+        except (ImportError, ValueError, SystemError):
+            from models import FollowupReviewContext
+
+        previous_sha = self.previous_review.reviewed_commit_sha
+
+        if not previous_sha:
+            print(
+                "[Followup] No reviewed_commit_sha in previous review, cannot gather incremental context",
+                flush=True,
+            )
+            return FollowupReviewContext(
+                pr_number=self.pr_number,
+                previous_review=self.previous_review,
+                previous_commit_sha="",
+                current_commit_sha="",
+            )
+
+        print(
+            f"[Followup] Gathering context since commit {previous_sha[:8]}...",
+            flush=True,
+        )
+
+        # Get current HEAD SHA
+        current_sha = await self.gh_client.get_pr_head_sha(self.pr_number)
+
+        if not current_sha:
+            print("[Followup] Could not fetch current HEAD SHA", flush=True)
+            return FollowupReviewContext(
+                pr_number=self.pr_number,
+                previous_review=self.previous_review,
+                previous_commit_sha=previous_sha,
+                current_commit_sha="",
+            )
+
+        if previous_sha == current_sha:
+            print("[Followup] No new commits since last review", flush=True)
+            return FollowupReviewContext(
+                pr_number=self.pr_number,
+                previous_review=self.previous_review,
+                previous_commit_sha=previous_sha,
+                current_commit_sha=current_sha,
+            )
+
+        print(
+            f"[Followup] Comparing {previous_sha[:8]}...{current_sha[:8]}", flush=True
+        )
+
+        # Get commit comparison
+        try:
+            comparison = await self.gh_client.compare_commits(previous_sha, current_sha)
+        except Exception as e:
+            print(f"[Followup] Error comparing commits: {e}", flush=True)
+            return FollowupReviewContext(
+                pr_number=self.pr_number,
+                previous_review=self.previous_review,
+                previous_commit_sha=previous_sha,
+                current_commit_sha=current_sha,
+            )
+
+        # Extract data from comparison
+        commits = comparison.get("commits", [])
+        files = comparison.get("files", [])
+        print(
+            f"[Followup] Found {len(commits)} new commits, {len(files)} changed files",
+            flush=True,
+        )
+
+        # Build diff from file patches
+        diff_parts = []
+        files_changed = []
+        for file_info in files:
+            filename = file_info.get("filename", "")
+            files_changed.append(filename)
+            patch = file_info.get("patch", "")
+            if patch:
+                diff_parts.append(f"--- a/{filename}\n+++ b/{filename}\n{patch}")
+
+        diff_since_review = "\n\n".join(diff_parts)
+
+        # Get comments since last review
+        try:
+            comments = await self.gh_client.get_comments_since(
+                self.pr_number, self.previous_review.reviewed_at
+            )
+        except Exception as e:
+            print(f"[Followup] Error fetching comments: {e}", flush=True)
+            comments = {"review_comments": [], "issue_comments": []}
+
+        # Separate AI bot comments from contributor comments
+        ai_comments = []
+        contributor_comments = []
+
+        all_comments = comments.get("review_comments", []) + comments.get(
+            "issue_comments", []
+        )
+
+        for comment in all_comments:
+            author = ""
+            if isinstance(comment.get("user"), dict):
+                author = comment["user"].get("login", "").lower()
+            elif isinstance(comment.get("author"), dict):
+                author = comment["author"].get("login", "").lower()
+
+            is_ai_bot = any(pattern in author for pattern in AI_BOT_PATTERNS.keys())
+
+            if is_ai_bot:
+                ai_comments.append(comment)
+            else:
+                contributor_comments.append(comment)
+
+        print(
+            f"[Followup] Found {len(contributor_comments)} contributor comments, {len(ai_comments)} AI comments",
+            flush=True,
+        )
+
+        return FollowupReviewContext(
+            pr_number=self.pr_number,
+            previous_review=self.previous_review,
+            previous_commit_sha=previous_sha,
+            current_commit_sha=current_sha,
+            commits_since_review=commits,
+            files_changed_since_review=files_changed,
+            diff_since_review=diff_since_review,
+            contributor_comments_since_review=contributor_comments,
+            ai_bot_comments_since_review=ai_comments,
+        )

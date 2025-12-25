@@ -62,6 +62,8 @@ export function GitHubPRs({ onOpenSettings }: GitHubPRsProps) {
     activePRReviews,
     selectPR,
     runReview,
+    runFollowupReview,
+    checkNewCommits,
     cancelReview,
     postReview,
     postComment,
@@ -80,6 +82,19 @@ export function GitHubPRs({ onOpenSettings }: GitHubPRsProps) {
       runReview(selectedPRNumber);
     }
   }, [selectedPRNumber, runReview]);
+
+  const handleRunFollowupReview = useCallback(() => {
+    if (selectedPRNumber) {
+      runFollowupReview(selectedPRNumber);
+    }
+  }, [selectedPRNumber, runFollowupReview]);
+
+  const handleCheckNewCommits = useCallback(async () => {
+    if (selectedPRNumber) {
+      return await checkNewCommits(selectedPRNumber);
+    }
+    return { hasNewCommits: false, newCommitCount: 0 };
+  }, [selectedPRNumber, checkNewCommits]);
 
   const handleCancelReview = useCallback(() => {
     if (selectedPRNumber) {
@@ -175,6 +190,8 @@ export function GitHubPRs({ onOpenSettings }: GitHubPRsProps) {
               reviewProgress={reviewProgress}
               isReviewing={isReviewing}
               onRunReview={handleRunReview}
+              onRunFollowupReview={handleRunFollowupReview}
+              onCheckNewCommits={handleCheckNewCommits}
               onCancelReview={handleCancelReview}
               onPostReview={handlePostReview}
               onPostComment={handlePostComment}

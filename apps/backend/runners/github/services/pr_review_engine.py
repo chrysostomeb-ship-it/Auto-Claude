@@ -8,7 +8,9 @@ Core logic for multi-pass PR code review.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 try:
     from ..context_gatherer import PRContext
@@ -19,7 +21,6 @@ try:
         ReviewPass,
         StructuralIssue,
     )
-    from ..orchestrator import ProgressCallback
     from .prompt_manager import PromptManager
     from .response_parsers import ResponseParser
 except (ImportError, ValueError, SystemError):
@@ -31,9 +32,20 @@ except (ImportError, ValueError, SystemError):
         ReviewPass,
         StructuralIssue,
     )
-    from orchestrator import ProgressCallback
     from services.prompt_manager import PromptManager
     from services.response_parsers import ResponseParser
+
+
+# Define a local ProgressCallback to avoid circular import
+@dataclass
+class ProgressCallback:
+    """Callback for progress updates - local definition to avoid circular import."""
+
+    phase: str
+    progress: int
+    message: str
+    pr_number: int | None = None
+    extra: dict[str, Any] | None = None
 
 
 class PRReviewEngine:

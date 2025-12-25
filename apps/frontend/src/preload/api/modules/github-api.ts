@@ -239,6 +239,10 @@ export interface GitHubAPI {
   assignPR: (projectId: string, prNumber: number, username: string) => Promise<boolean>;
   getPRReview: (projectId: string, prNumber: number) => Promise<PRReviewResult | null>;
 
+  // Follow-up review operations
+  checkNewCommits: (projectId: string, prNumber: number) => Promise<NewCommitsCheck>;
+  runFollowupReview: (projectId: string, prNumber: number) => void;
+
   // PR event listeners
   onPRReviewProgress: (
     callback: (projectId: string, progress: PRReviewProgress) => void
@@ -306,6 +310,26 @@ export interface PRReviewResult {
   reviewId?: number;
   reviewedAt: string;
   error?: string;
+  // Follow-up review fields
+  reviewedCommitSha?: string;
+  isFollowupReview?: boolean;
+  previousReviewId?: number;
+  resolvedFindings?: string[];
+  unresolvedFindings?: string[];
+  newFindingsSinceLastReview?: string[];
+  // Track if findings have been posted to GitHub (enables follow-up review)
+  hasPostedFindings?: boolean;
+  postedFindingIds?: string[];
+}
+
+/**
+ * Result of checking for new commits since last review
+ */
+export interface NewCommitsCheck {
+  hasNewCommits: boolean;
+  newCommitCount: number;
+  lastReviewedCommit?: string;
+  currentHeadCommit?: string;
 }
 
 /**
@@ -520,6 +544,13 @@ export const createGitHubAPI = (): GitHubAPI => ({
 
   getPRReview: (projectId: string, prNumber: number): Promise<PRReviewResult | null> =>
     invokeIpc(IPC_CHANNELS.GITHUB_PR_GET_REVIEW, projectId, prNumber),
+
+  // Follow-up review operations
+  checkNewCommits: (projectId: string, prNumber: number): Promise<NewCommitsCheck> =>
+    invokeIpc(IPC_CHANNELS.GITHUB_PR_CHECK_NEW_COMMITS, projectId, prNumber),
+
+  runFollowupReview: (projectId: string, prNumber: number): void =>
+    sendIpc(IPC_CHANNELS.GITHUB_PR_FOLLOWUP_REVIEW, projectId, prNumber),
 
   // PR event listeners
   onPRReviewProgress: (

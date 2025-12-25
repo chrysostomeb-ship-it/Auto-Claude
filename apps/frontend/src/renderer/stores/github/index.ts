@@ -21,7 +21,8 @@ export {
 export {
   usePRReviewStore,
   initializePRReviewListeners,
-  startPRReview
+  startPRReview,
+  startFollowupReview
 } from './pr-review-store';
 import { initializePRReviewListeners as _initPRReviewListeners } from './pr-review-store';
 

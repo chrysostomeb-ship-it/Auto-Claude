@@ -2,9 +2,10 @@ import { useState, useEffect, useCallback, useMemo } from 'react';
 import type {
   PRData,
   PRReviewResult,
-  PRReviewProgress
+  PRReviewProgress,
+  NewCommitsCheck
 } from '../../../../preload/api/modules/github-api';
-import { usePRReviewStore, startPRReview as storeStartPRReview } from '../../../stores/github';
+import { usePRReviewStore, startPRReview as storeStartPRReview, startFollowupReview as storeStartFollowupReview } from '../../../stores/github';
 
 // Re-export types for consumers
 export type { PRData, PRReviewResult, PRReviewProgress };
@@ -25,6 +26,8 @@ interface UseGitHubPRsResult {
   selectPR: (prNumber: number | null) => void;
   refresh: () => Promise<void>;
   runReview: (prNumber: number) => Promise<void>;
+  runFollowupReview: (prNumber: number) => Promise<void>;
+  checkNewCommits: (prNumber: number) => Promise<NewCommitsCheck>;
   cancelReview: (prNumber: number) => Promise<boolean>;
   postReview: (prNumber: number, selectedFindingIds?: string[]) => Promise<boolean>;
   postComment: (prNumber: number, body: string) => Promise<boolean>;
@@ -163,6 +166,26 @@ export function useGitHubPRs(projectId?: string): UseGitHubPRsResult {
     storeStartPRReview(projectId, prNumber);
   }, [projectId]);
 
+  const runFollowupReview = useCallback(async (prNumber: number) => {
+    if (!projectId) return;
+
+    // Use the store function which handles both state and IPC
+    storeStartFollowupReview(projectId, prNumber);
+  }, [projectId]);
+
+  const checkNewCommits = useCallback(async (prNumber: number): Promise<NewCommitsCheck> => {
+    if (!projectId) {
+      return { hasNewCommits: false, newCommitCount: 0 };
+    }
+
+    try {
+      return await window.electronAPI.github.checkNewCommits(projectId, prNumber);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to check for new commits');
+      return { hasNewCommits: false, newCommitCount: 0 };
+    }
+  }, [projectId]);
+
   const cancelReview = useCallback(async (prNumber: number): Promise<boolean> => {
     if (!projectId) return false;
 
@@ -248,6 +271,8 @@ export function useGitHubPRs(projectId?: string): UseGitHubPRsResult {
     selectPR,
     refresh,
     runReview,
+    runFollowupReview,
+    checkNewCommits,
     cancelReview,
     postReview,
     postComment,

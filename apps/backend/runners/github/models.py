@@ -363,6 +363,18 @@ class PRReviewResult:
     # NEW: Quick scan summary preserved
     quick_scan_summary: dict = field(default_factory=dict)
 
+    # Follow-up review tracking
+    reviewed_commit_sha: str | None = None  # HEAD SHA at time of review
+    is_followup_review: bool = False  # True if this is a follow-up review
+    previous_review_id: int | None = None  # Reference to the review this follows up on
+    resolved_findings: list[str] = field(default_factory=list)  # Finding IDs now fixed
+    unresolved_findings: list[str] = field(
+        default_factory=list
+    )  # Finding IDs still open
+    new_findings_since_last_review: list[str] = field(
+        default_factory=list
+    )  # New issues in recent commits
+
     def to_dict(self) -> dict:
         return {
             "pr_number": self.pr_number,
@@ -382,6 +394,13 @@ class PRReviewResult:
             "structural_issues": [s.to_dict() for s in self.structural_issues],
             "ai_comment_triages": [t.to_dict() for t in self.ai_comment_triages],
             "quick_scan_summary": self.quick_scan_summary,
+            # Follow-up review fields
+            "reviewed_commit_sha": self.reviewed_commit_sha,
+            "is_followup_review": self.is_followup_review,
+            "previous_review_id": self.previous_review_id,
+            "resolved_findings": self.resolved_findings,
+            "unresolved_findings": self.unresolved_findings,
+            "new_findings_since_last_review": self.new_findings_since_last_review,
         }
 
     @classmethod
@@ -415,6 +434,15 @@ class PRReviewResult:
                 AICommentTriage.from_dict(t) for t in data.get("ai_comment_triages", [])
             ],
             quick_scan_summary=data.get("quick_scan_summary", {}),
+            # Follow-up review fields
+            reviewed_commit_sha=data.get("reviewed_commit_sha"),
+            is_followup_review=data.get("is_followup_review", False),
+            previous_review_id=data.get("previous_review_id"),
+            resolved_findings=data.get("resolved_findings", []),
+            unresolved_findings=data.get("unresolved_findings", []),
+            new_findings_since_last_review=data.get(
+                "new_findings_since_last_review", []
+            ),
         )
 
     async def save(self, github_dir: Path) -> None:
@@ -477,6 +505,25 @@ class PRReviewResult:
 
         with open(review_file) as f:
             return cls.from_dict(json.load(f))
+
+
+@dataclass
+class FollowupReviewContext:
+    """Context for a follow-up review."""
+
+    pr_number: int
+    previous_review: PRReviewResult
+    previous_commit_sha: str
+    current_commit_sha: str
+
+    # Changes since last review
+    commits_since_review: list[dict] = field(default_factory=list)
+    files_changed_since_review: list[str] = field(default_factory=list)
+    diff_since_review: str = ""
+
+    # Comments since last review
+    contributor_comments_since_review: list[dict] = field(default_factory=list)
+    ai_bot_comments_since_review: list[dict] = field(default_factory=list)
 
 
 @dataclass

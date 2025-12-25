@@ -232,8 +232,8 @@ class BotDetector:
         if not commits:
             return None
 
-        # Commits are usually in reverse chronological order, so first is latest
-        latest = commits[0]
+        # GitHub API returns commits in chronological order (oldest first, newest last)
+        latest = commits[-1]
         return latest.get("oid") or latest.get("sha")
 
     def is_within_cooling_off(self, pr_number: int) -> tuple[bool, str]:

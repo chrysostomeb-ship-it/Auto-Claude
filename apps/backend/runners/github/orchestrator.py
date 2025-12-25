@@ -394,6 +394,9 @@ class GitHubOrchestrator:
                 risk_assessment=risk_assessment,
             )
 
+            # Get HEAD SHA for follow-up review tracking
+            head_sha = self.bot_detector.get_last_commit_sha(pr_context.commits)
+
             # Create result
             result = PRReviewResult(
                 pr_number=pr_number,
@@ -409,6 +412,8 @@ class GitHubOrchestrator:
                 structural_issues=structural_issues,
                 ai_comment_triages=ai_triages,
                 quick_scan_summary=quick_scan,
+                # Track the commit SHA for follow-up reviews
+                reviewed_commit_sha=head_sha,
             )
 
             # Post review if configured
@@ -436,8 +441,7 @@ class GitHubOrchestrator:
             # Save result
             await result.save(self.github_dir)
 
-            # Mark as reviewed
-            head_sha = self.bot_detector.get_last_commit_sha(pr_context.commits)
+            # Mark as reviewed (head_sha already fetched above)
             if head_sha:
                 self.bot_detector.mark_reviewed(pr_number, head_sha)
 
@@ -452,6 +456,137 @@ class GitHubOrchestrator:
                 repo=self.config.repo,
                 success=False,
                 error=str(e),
+            )
+            await result.save(self.github_dir)
+            return result
+
+    async def followup_review_pr(self, pr_number: int) -> PRReviewResult:
+        """
+        Perform a focused follow-up review of a PR.
+
+        Only reviews:
+        - Changes since last review (new commits)
+        - Whether previous findings are resolved
+        - New comments from contributors and AI bots
+
+        Args:
+            pr_number: The PR number to review
+
+        Returns:
+            PRReviewResult with follow-up analysis
+
+        Raises:
+            ValueError: If no previous review exists for this PR
+        """
+        print(
+            f"[DEBUG orchestrator] followup_review_pr() called for PR #{pr_number}",
+            flush=True,
+        )
+
+        # Load previous review
+        previous_review = PRReviewResult.load(self.github_dir, pr_number)
+
+        if not previous_review:
+            raise ValueError(
+                f"No previous review found for PR #{pr_number}. Run initial review first."
+            )
+
+        if not previous_review.reviewed_commit_sha:
+            raise ValueError(
+                f"Previous review for PR #{pr_number} doesn't have commit SHA. "
+                "Re-run initial review with the updated system."
+            )
+
+        self._report_progress(
+            "gathering_context",
+            10,
+            f"Gathering follow-up context for PR #{pr_number}...",
+            pr_number=pr_number,
+        )
+
+        try:
+            # Import here to avoid circular imports at module level
+            try:
+                from .context_gatherer import FollowupContextGatherer
+                from .services.followup_reviewer import FollowupReviewer
+            except (ImportError, ValueError, SystemError):
+                from context_gatherer import FollowupContextGatherer
+                from services.followup_reviewer import FollowupReviewer
+
+            # Gather follow-up context
+            gatherer = FollowupContextGatherer(
+                self.project_dir,
+                pr_number,
+                previous_review,
+            )
+            followup_context = await gatherer.gather()
+
+            # Check if there are new commits
+            if not followup_context.commits_since_review:
+                print(
+                    f"[Followup] No new commits since last review at {previous_review.reviewed_commit_sha[:8]}",
+                    flush=True,
+                )
+                # Return a result indicating no changes
+                result = PRReviewResult(
+                    pr_number=pr_number,
+                    repo=self.config.repo,
+                    success=True,
+                    findings=previous_review.findings,
+                    summary="No new commits since last review. Previous findings still apply.",
+                    overall_status=previous_review.overall_status,
+                    verdict=previous_review.verdict,
+                    verdict_reasoning="No changes since last review.",
+                    reviewed_commit_sha=followup_context.current_commit_sha
+                    or previous_review.reviewed_commit_sha,
+                    is_followup_review=True,
+                    unresolved_findings=[f.id for f in previous_review.findings],
+                )
+                await result.save(self.github_dir)
+                return result
+
+            self._report_progress(
+                "analyzing",
+                30,
+                f"Analyzing {len(followup_context.commits_since_review)} new commits...",
+                pr_number=pr_number,
+            )
+
+            # Run follow-up review
+            reviewer = FollowupReviewer(
+                project_dir=self.project_dir,
+                github_dir=self.github_dir,
+                config=self.config,
+                progress_callback=lambda p: self._report_progress(
+                    p.get("phase", "analyzing"),
+                    p.get("progress", 50),
+                    p.get("message", "Reviewing..."),
+                    pr_number=pr_number,
+                ),
+            )
+
+            result = await reviewer.review_followup(followup_context)
+
+            # Save result
+            await result.save(self.github_dir)
+
+            # Mark as reviewed with new commit SHA
+            if result.reviewed_commit_sha:
+                self.bot_detector.mark_reviewed(pr_number, result.reviewed_commit_sha)
+
+            self._report_progress(
+                "complete", 100, "Follow-up review complete!", pr_number=pr_number
+            )
+
+            return result
+
+        except Exception as e:
+            result = PRReviewResult(
+                pr_number=pr_number,
+                repo=self.config.repo,
+                success=False,
+                error=str(e),
+                is_followup_review=True,
             )
             await result.save(self.github_dir)
             return result

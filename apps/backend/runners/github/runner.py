@@ -177,6 +177,74 @@ async def cmd_review_pr(args) -> int:
         return 1
 
 
+async def cmd_followup_review_pr(args) -> int:
+    """Perform a follow-up review of a pull request."""
+    import sys
+
+    # Force unbuffered output so Electron sees it in real-time
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+
+    print(f"[DEBUG] Starting follow-up review for PR #{args.pr_number}", flush=True)
+    print(f"[DEBUG] Project directory: {args.project}", flush=True)
+
+    print("[DEBUG] Building config...", flush=True)
+    config = get_config(args)
+    print(f"[DEBUG] Config built: repo={config.repo}, model={config.model}", flush=True)
+
+    print("[DEBUG] Creating orchestrator...", flush=True)
+    orchestrator = GitHubOrchestrator(
+        project_dir=args.project,
+        config=config,
+        progress_callback=print_progress,
+    )
+    print("[DEBUG] Orchestrator created", flush=True)
+
+    print(
+        f"[DEBUG] Calling orchestrator.followup_review_pr({args.pr_number})...",
+        flush=True,
+    )
+
+    try:
+        result = await orchestrator.followup_review_pr(args.pr_number)
+    except ValueError as e:
+        print(f"\nFollow-up review failed: {e}")
+        return 1
+
+    print(f"[DEBUG] followup_review_pr returned, success={result.success}", flush=True)
+
+    if result.success:
+        print(f"\n{'=' * 60}")
+        print(f"PR #{result.pr_number} Follow-up Review Complete")
+        print(f"{'=' * 60}")
+        print(f"Status: {result.overall_status}")
+        print(f"Is Follow-up: {result.is_followup_review}")
+
+        if result.resolved_findings:
+            print(f"Resolved: {len(result.resolved_findings)} finding(s)")
+        if result.unresolved_findings:
+            print(f"Still Open: {len(result.unresolved_findings)} finding(s)")
+        if result.new_findings_since_last_review:
+            print(
+                f"New Issues: {len(result.new_findings_since_last_review)} finding(s)"
+            )
+
+        print(f"\nSummary:\n{result.summary}")
+
+        if result.findings:
+            print("\nRemaining Findings:")
+            for f in result.findings:
+                emoji = {"critical": "!", "high": "*", "medium": "-", "low": "."}
+                print(
+                    f"  {emoji.get(f.severity.value, '?')} [{f.severity.value.upper()}] {f.title}"
+                )
+                print(f"    File: {f.file}:{f.line}")
+        return 0
+    else:
+        print(f"\nFollow-up review failed: {result.error}")
+        return 1
+
+
 async def cmd_triage(args) -> int:
     """Triage issues."""
     config = get_config(args)
@@ -543,6 +611,13 @@ def main():
         help="Automatically post review to GitHub",
     )
 
+    # followup-review-pr command
+    followup_parser = subparsers.add_parser(
+        "followup-review-pr",
+        help="Follow-up review of a PR (after contributor changes)",
+    )
+    followup_parser.add_argument("pr_number", type=int, help="PR number to review")
+
     # triage command
     triage_parser = subparsers.add_parser("triage", help="Triage issues")
     triage_parser.add_argument(
@@ -631,6 +706,7 @@ def main():
     # Route to command handler
     commands = {
         "review-pr": cmd_review_pr,
+        "followup-review-pr": cmd_followup_review_pr,
         "triage": cmd_triage,
         "auto-fix": cmd_auto_fix,
         "check-auto-fix-labels": cmd_check_labels,

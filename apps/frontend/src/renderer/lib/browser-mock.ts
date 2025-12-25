@@ -153,6 +153,8 @@ const browserMockAPI: ElectronAPI = {
     assignPR: async () => true,
     getPRReview: async () => null,
     deletePRReview: async () => true,
+    checkNewCommits: async () => ({ hasNewCommits: false, newCommitCount: 0 }),
+    runFollowupReview: () => {},
     onPRReviewProgress: () => () => {},
     onPRReviewComplete: () => () => {},
     onPRReviewError: () => () => {},

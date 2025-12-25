@@ -334,6 +334,48 @@ For each finding, output a JSON array:
 Be specific and actionable. Focus on significant issues, not nitpicks.
 """
 
+    def get_followup_review_prompt(self) -> str:
+        """Get the follow-up PR review prompt."""
+        prompt_file = self.prompts_dir / "pr_followup.md"
+        if prompt_file.exists():
+            return prompt_file.read_text()
+        return self._get_default_followup_review_prompt()
+
+    def _get_default_followup_review_prompt(self) -> str:
+        """Default follow-up review prompt if file doesn't exist."""
+        return """# PR Follow-up Review Agent
+
+You are performing a focused follow-up review of a pull request. The PR has already received an initial review.
+
+Your tasks:
+1. Check if previous findings have been resolved
+2. Review only the NEW changes since last review
+3. Determine merge readiness
+
+For each previous finding, determine:
+- RESOLVED: The issue was fixed
+- UNRESOLVED: The issue remains
+
+For new issues in the diff, report them with:
+- severity: critical|high|medium|low
+- category: security|quality|logic|test
+- title, description, file, line, suggested_fix
+
+Output JSON:
+```json
+{
+  "finding_resolutions": [
+    {"finding_id": "prev-1", "status": "resolved", "resolution_notes": "Fixed with parameterized query"}
+  ],
+  "new_findings": [
+    {"id": "new-1", "severity": "high", "category": "security", "title": "...", "description": "...", "file": "...", "line": 42}
+  ],
+  "verdict": "READY_TO_MERGE|MERGE_WITH_CHANGES|NEEDS_REVISION|BLOCKED",
+  "verdict_reasoning": "Explanation of the verdict"
+}
+```
+"""
+
     def get_triage_prompt(self) -> str:
         """Get the issue triage prompt."""
         prompt_file = self.prompts_dir / "issue_triager.md"

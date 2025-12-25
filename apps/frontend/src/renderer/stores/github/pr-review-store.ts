@@ -175,3 +175,12 @@ export function startPRReview(projectId: string, prNumber: number): void {
   store.startPRReview(projectId, prNumber);
   window.electronAPI.github.runPRReview(projectId, prNumber);
 }
+
+/**
+ * Start a follow-up PR review and track it in the store
+ */
+export function startFollowupReview(projectId: string, prNumber: number): void {
+  const store = usePRReviewStore.getState();
+  store.startPRReview(projectId, prNumber);
+  window.electronAPI.github.runFollowupReview(projectId, prNumber);
+}

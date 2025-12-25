@@ -624,3 +624,88 @@ class GHClient:
             f"assignees={','.join(assignees)}",
         ]
         await self.run(args)
+
+    async def compare_commits(self, base_sha: str, head_sha: str) -> dict[str, Any]:
+        """
+        Compare two commits to get changes between them.
+
+        Uses: GET /repos/{owner}/{repo}/compare/{base}...{head}
+
+        Args:
+            base_sha: Base commit SHA (e.g., last reviewed commit)
+            head_sha: Head commit SHA (e.g., current PR HEAD)
+
+        Returns:
+            Dict with:
+            - commits: List of commits between base and head
+            - files: List of changed files with patches
+            - ahead_by: Number of commits head is ahead of base
+            - behind_by: Number of commits head is behind base
+            - total_commits: Total number of commits in comparison
+        """
+        endpoint = f"repos/{{owner}}/{{repo}}/compare/{base_sha}...{head_sha}"
+        args = ["api", endpoint]
+
+        result = await self.run(args, timeout=60.0)  # Longer timeout for large diffs
+        return json.loads(result.stdout)
+
+    async def get_comments_since(
+        self, pr_number: int, since_timestamp: str
+    ) -> dict[str, list[dict]]:
+        """
+        Get all comments (review + issue) since a timestamp.
+
+        Args:
+            pr_number: PR number
+            since_timestamp: ISO timestamp to filter from (e.g., "2025-12-25T10:30:00Z")
+
+        Returns:
+            Dict with:
+            - review_comments: Inline review comments on files
+            - issue_comments: General PR discussion comments
+        """
+        # Fetch inline review comments
+        review_endpoint = f"repos/{{owner}}/{{repo}}/pulls/{pr_number}/comments"
+        review_args = ["api", review_endpoint, "-f", f"since={since_timestamp}"]
+        review_result = await self.run(review_args, raise_on_error=False)
+
+        review_comments = []
+        if review_result.returncode == 0:
+            try:
+                review_comments = json.loads(review_result.stdout)
+            except json.JSONDecodeError:
+                logger.warning(f"Failed to parse review comments for PR #{pr_number}")
+
+        # Fetch general issue comments
+        issue_endpoint = f"repos/{{owner}}/{{repo}}/issues/{pr_number}/comments"
+        issue_args = ["api", issue_endpoint, "-f", f"since={since_timestamp}"]
+        issue_result = await self.run(issue_args, raise_on_error=False)
+
+        issue_comments = []
+        if issue_result.returncode == 0:
+            try:
+                issue_comments = json.loads(issue_result.stdout)
+            except json.JSONDecodeError:
+                logger.warning(f"Failed to parse issue comments for PR #{pr_number}")
+
+        return {
+            "review_comments": review_comments,
+            "issue_comments": issue_comments,
+        }
+
+    async def get_pr_head_sha(self, pr_number: int) -> str | None:
+        """
+        Get the current HEAD SHA of a PR.
+
+        Args:
+            pr_number: PR number
+
+        Returns:
+            HEAD commit SHA or None if not found
+        """
+        data = await self.pr_get(pr_number, json_fields=["commits"])
+        commits = data.get("commits", [])
+        if commits:
+            # Last commit is the HEAD
+            return commits[-1].get("oid")
+        return None
