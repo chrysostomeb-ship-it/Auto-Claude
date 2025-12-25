@@ -36,13 +36,13 @@ const OUTPUT_DIR = 'python-runtime';
 
 // SHA256 checksums for verification (from python-build-standalone release)
 // These must be updated when changing PYTHON_VERSION or RELEASE_TAG
-// Get checksums from: https://github.com/indygreg/python-build-standalone/releases
+// Get checksums from: https://github.com/indygreg/python-build-standalone/releases/download/{RELEASE_TAG}/SHA256SUMS
 const CHECKSUMS = {
   'darwin-arm64': 'abe1de2494bb8b243fd507944f4d50292848fa00685d5288c858a72623a16635',
-  'darwin-x64': null,    // Will be populated on first successful download
-  'win32-x64': null,     // Will be populated on first successful download
-  'linux-x64': null,     // Will be populated on first successful download
-  'linux-arm64': null,   // Will be populated on first successful download
+  'darwin-x64': '867c1af10f204224b571f8f2593fc9eb580fe0c2376224d1096ebe855ad8c722',
+  'win32-x64': '1a702b3463cf87ec0d2e33902a47e95456053b0178fe96bd673c1dbb554f5d15',
+  'linux-x64': '698e53b264a9bcd35cfa15cd680c4d78b0878fa529838844b5ffd0cd661d6bc2',
+  'linux-arm64': 'fb983ec85952513f5f013674fcbf4306b1a142c50fcfd914c2c3f00c61a874b0',
 };
 
 // Map Node.js platform names to electron-builder platform names
