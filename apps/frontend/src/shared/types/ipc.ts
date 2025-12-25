@@ -114,6 +114,7 @@ export interface TabState {
   openProjectIds: string[];
   activeProjectId: string | null;
   tabOrder: string[];
+  userClosedAllTabs?: boolean; // Flag to track if user intentionally closed all tabs
 }
 
 export interface ElectronAPI {
