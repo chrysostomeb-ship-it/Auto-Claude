@@ -116,8 +116,12 @@ export const webAPI: ElectronAPI = {
     request('GET', `/tasks/${taskId}/review?projectId=${currentProjectId}`),
   getTaskRunningStatus: (taskId: string) =>
     request('GET', `/tasks/${taskId}/status`),
-  checkTaskRunning: (taskId: string) =>
-    Promise.resolve({ success: true, data: false }),
+  checkTaskRunning: async (taskId: string) => {
+    const result = await request<{ running?: boolean; isRunning?: boolean }>('GET', `/tasks/${taskId}/status`);
+    // Handle both "running" and "isRunning" field names
+    const isRunning = result.success && (result.data?.running === true || result.data?.isRunning === true);
+    return { success: true, data: isRunning };
+  },
   recoverStuckTask: (taskId: string, options?: unknown) => {
     console.log('[WebAPI] recoverStuckTask called with:', { taskId, typeofTaskId: typeof taskId, options, currentProjectId });
     return request('POST', `/tasks/${taskId}/recover`, { projectId: currentProjectId, options });
@@ -164,8 +168,12 @@ export const webAPI: ElectronAPI = {
     request('GET', `/tasks/${taskId}/worktree/status?projectId=${currentProjectId}`),
   getWorktreeDiff: (taskId: string) =>
     request('GET', `/tasks/${taskId}/worktree/diff?projectId=${currentProjectId}`),
-  mergeWorktree: (taskId: string, _options?: { noCommit?: boolean }) =>
-    request('POST', `/tasks/${taskId}/worktree/merge`, { projectId: currentProjectId }),
+  mergeWorktree: (taskId: string, options?: { noCommit?: boolean; targetBranch?: string }) =>
+    request('POST', `/tasks/${taskId}/worktree/merge`, {
+      projectId: currentProjectId,
+      noCommit: options?.noCommit,
+      targetBranch: options?.targetBranch
+    }),
   getMergePreview: (taskId: string) =>
     request('GET', `/tasks/${taskId}/worktree/merge-preview?projectId=${currentProjectId}`),
   mergeWorktreePreview: (taskId: string) =>

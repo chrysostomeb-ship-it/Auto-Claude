@@ -68,12 +68,15 @@ export function TaskDetailPanel({ task, onClose }: TaskDetailPanelProps) {
   };
 
   const handleMerge = async () => {
-    console.warn('[TaskDetailPanel] handleMerge called, stageOnly:', state.stageOnly);
+    console.warn('[TaskDetailPanel] handleMerge called, stageOnly:', state.stageOnly, 'targetBranch:', state.targetBranch);
     state.setIsMerging(true);
     state.setWorkspaceError(null);
     try {
       console.warn('[TaskDetailPanel] Calling mergeWorktree...');
-      const result = await window.electronAPI.mergeWorktree(task.id, { noCommit: state.stageOnly });
+      const result = await window.electronAPI.mergeWorktree(task.id, {
+        noCommit: state.stageOnly,
+        targetBranch: state.targetBranch
+      });
       console.warn('[TaskDetailPanel] mergeWorktree result:', JSON.stringify(result, null, 2));
       if (result.success && result.data?.success) {
         // For stage-only: don't close the panel, show success message
@@ -210,6 +213,8 @@ export function TaskDetailPanel({ task, onClose }: TaskDetailPanelProps) {
                     onStageOnlyChange={state.setStageOnly}
                     onShowConflictDialog={state.setShowConflictDialog}
                     onLoadMergePreview={state.loadMergePreview}
+                    targetBranch={state.targetBranch}
+                    onTargetBranchChange={state.setTargetBranch}
                   />
                 )}
               </div>

@@ -250,6 +250,41 @@ export async function getRoadmapViaAPI(projectId: string): Promise<{ success: bo
 }
 
 /**
+ * Get memory status via API
+ */
+export async function getMemoryStatusViaAPI(projectId: string): Promise<{ success: boolean; data?: unknown; error?: string }> {
+  return api.get(`/context/memory-status?projectId=${projectId}`);
+}
+
+/**
+ * Get project context via API
+ */
+export async function getProjectContextViaAPI(projectId: string): Promise<{ success: boolean; data?: unknown; error?: string }> {
+  return api.get(`/context?projectId=${projectId}`);
+}
+
+/**
+ * Get recent memories via API
+ */
+export async function getMemoriesViaAPI(projectId: string, limit: number = 20): Promise<{ success: boolean; data?: unknown[]; error?: string }> {
+  return api.get(`/context/memories?projectId=${projectId}&limit=${limit}`);
+}
+
+/**
+ * Search memories via API
+ */
+export async function searchMemoriesViaAPI(projectId: string, query: string): Promise<{ success: boolean; data?: unknown[]; error?: string }> {
+  return api.get(`/context/memories/search?projectId=${projectId}&q=${encodeURIComponent(query)}`);
+}
+
+/**
+ * Refresh project index via API
+ */
+export async function refreshProjectIndexViaAPI(projectId: string): Promise<{ success: boolean; data?: unknown; error?: string }> {
+  return api.post(`/context/refresh?projectId=${projectId}`);
+}
+
+/**
  * WebSocket helper for real-time events
  */
 export class WebSocketHelper {

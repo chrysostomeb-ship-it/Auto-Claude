@@ -19,6 +19,13 @@ import { Badge } from './ui/badge';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from './ui/card';
 import { ScrollArea } from './ui/scroll-area';
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from './ui/select';
+import {
   Dialog,
   DialogContent,
   DialogDescription,
@@ -40,6 +47,12 @@ import { useProjectStore } from '../stores/project-store';
 import { useTaskStore } from '../stores/task-store';
 import type { WorktreeListItem, WorktreeMergeResult } from '../../shared/types';
 
+interface Branch {
+  name: string;
+  isRemote: boolean;
+  isCurrent: boolean;
+}
+
 interface WorktreesProps {
   projectId: string;
 }
@@ -58,6 +71,9 @@ export function Worktrees({ projectId }: WorktreesProps) {
   const [selectedWorktree, setSelectedWorktree] = useState<WorktreeListItem | null>(null);
   const [isMerging, setIsMerging] = useState(false);
   const [mergeResult, setMergeResult] = useState<WorktreeMergeResult | null>(null);
+  const [branches, setBranches] = useState<Branch[]>([]);
+  const [targetBranch, setTargetBranch] = useState<string>('');
+  const [isLoadingBranches, setIsLoadingBranches] = useState(false);
 
   // Delete confirmation state
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
@@ -90,6 +106,26 @@ export function Worktrees({ projectId }: WorktreesProps) {
     loadWorktrees();
   }, [loadWorktrees]);
 
+  // Load branches for the project
+  useEffect(() => {
+    const fetchBranches = async () => {
+      if (!projectId) return;
+      setIsLoadingBranches(true);
+      try {
+        const result = await window.electronAPI.getChangelogBranches(projectId);
+        if (result.success && result.data) {
+          const localBranches = result.data.filter((b: Branch) => !b.isRemote && b.name !== 'origin');
+          setBranches(localBranches);
+        }
+      } catch (err) {
+        console.error('Failed to fetch branches:', err);
+      } finally {
+        setIsLoadingBranches(false);
+      }
+    };
+    fetchBranches();
+  }, [projectId]);
+
   // Find task for a worktree
   const findTaskForWorktree = (specName: string) => {
     return tasks.find(t => t.specId === specName);
@@ -107,7 +143,9 @@ export function Worktrees({ projectId }: WorktreesProps) {
 
     setIsMerging(true);
     try {
-      const result = await window.electronAPI.mergeWorktree(task.id);
+      // Use selected targetBranch or fallback to baseBranch
+      const effectiveTargetBranch = targetBranch || selectedWorktree.baseBranch;
+      const result = await window.electronAPI.mergeWorktree(task.id, { targetBranch: effectiveTargetBranch });
       if (result.success && result.data) {
         setMergeResult(result.data);
         if (result.data.success) {
@@ -162,6 +200,7 @@ export function Worktrees({ projectId }: WorktreesProps) {
   const openMergeDialog = (worktree: WorktreeListItem) => {
     setSelectedWorktree(worktree);
     setMergeResult(null);
+    setTargetBranch(worktree.baseBranch);
     setShowMergeDialog(true);
   };
 
@@ -357,7 +396,27 @@ export function Worktrees({ projectId }: WorktreesProps) {
                 </div>
                 <div className="flex items-center justify-between">
                   <span className="text-muted-foreground">Target Branch</span>
-                  <span className="font-mono">{selectedWorktree.baseBranch}</span>
+                  {branches.length > 0 ? (
+                    <Select
+                      value={targetBranch || selectedWorktree.baseBranch}
+                      onValueChange={setTargetBranch}
+                      disabled={isLoadingBranches || isMerging}
+                    >
+                      <SelectTrigger className="h-8 w-[180px] font-mono text-xs">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {branches.map((branch) => (
+                          <SelectItem key={branch.name} value={branch.name} className="font-mono text-xs">
+                            {branch.name}
+                            {branch.isCurrent && <span className="ml-1 text-muted-foreground">(current)</span>}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  ) : (
+                    <span className="font-mono">{selectedWorktree.baseBranch}</span>
+                  )}
                 </div>
                 <div className="border-t border-border pt-3 mt-3">
                   <div className="flex items-center justify-between text-xs">
@@ -415,7 +474,7 @@ export function Worktrees({ projectId }: WorktreesProps) {
             >
               {mergeResult ? 'Close' : 'Cancel'}
             </Button>
-            {!mergeResult && (
+            {!mergeResult && selectedWorktree && (
               <Button
                 onClick={handleMerge}
                 disabled={isMerging}
@@ -428,7 +487,7 @@ export function Worktrees({ projectId }: WorktreesProps) {
                 ) : (
                   <>
                     <GitMerge className="h-4 w-4 mr-2" />
-                    Merge
+                    Merge to {targetBranch || selectedWorktree.baseBranch}
                   </>
                 )}
               </Button>

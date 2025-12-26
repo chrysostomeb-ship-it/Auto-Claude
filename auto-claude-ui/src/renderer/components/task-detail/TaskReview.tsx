@@ -40,6 +40,8 @@ interface TaskReviewProps {
   onShowConflictDialog: (show: boolean) => void;
   onLoadMergePreview: () => void;
   onClose?: () => void;
+  targetBranch?: string;
+  onTargetBranchChange?: (branch: string) => void;
 }
 
 /**
@@ -79,7 +81,9 @@ export function TaskReview({
   onStageOnlyChange,
   onShowConflictDialog,
   onLoadMergePreview,
-  onClose
+  onClose,
+  targetBranch,
+  onTargetBranchChange
 }: TaskReviewProps) {
   return (
     <div className="space-y-4">
@@ -109,6 +113,8 @@ export function TaskReview({
           isLoadingPreview={isLoadingPreview}
           isMerging={isMerging}
           isDiscarding={isDiscarding}
+          targetBranch={targetBranch}
+          onTargetBranchChange={onTargetBranchChange}
           onShowDiffDialog={onShowDiffDialog}
           onShowDiscardDialog={onShowDiscardDialog}
           onShowConflictDialog={onShowConflictDialog}

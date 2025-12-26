@@ -403,6 +403,78 @@ test.describe('E2E: Full Task Lifecycle', () => {
 });
 
 // ============================================
+// Context/Memory Tests
+// ============================================
+
+test.describe('API: Context & Memory', () => {
+  let projectId: string;
+
+  test.beforeAll(async () => {
+    // Add project first
+    const result = await api.post('/projects', { path: TEST_PROJECT_DIR });
+    projectId = (result.data as { id: string }).id;
+  });
+
+  test('should get memory status', async () => {
+    const result = await api.get(`/context/memory-status?projectId=${projectId}`);
+    expect(result.success).toBe(true);
+    expect(result.data).toHaveProperty('available');
+    expect(result.data).toHaveProperty('enabled');
+    // Should have connection info if available
+    if ((result.data as { available: boolean }).available) {
+      expect(result.data).toHaveProperty('host');
+      expect(result.data).toHaveProperty('port');
+    }
+  });
+
+  test('should get project context', async () => {
+    const result = await api.get(`/context?projectId=${projectId}`);
+    expect(result.success).toBe(true);
+    expect(result.data).toHaveProperty('memoryStatus');
+    expect(result.data).toHaveProperty('projectIndex');
+  });
+
+  test('should get recent memories (empty or with data)', async () => {
+    const result = await api.get(`/context/memories?projectId=${projectId}&limit=10`);
+    expect(result.success).toBe(true);
+    expect(Array.isArray(result.data)).toBe(true);
+    // Each memory should have required fields if any exist
+    const memories = result.data as Array<{ id: string; type: string; content: string }>;
+    for (const memory of memories) {
+      expect(memory).toHaveProperty('id');
+      expect(memory).toHaveProperty('type');
+      expect(memory).toHaveProperty('content');
+    }
+  });
+
+  test('should search memories', async () => {
+    const result = await api.get(`/context/memories/search?projectId=${projectId}&q=test`);
+    expect(result.success).toBe(true);
+    expect(Array.isArray(result.data)).toBe(true);
+    // Each result should have score and content if any exist
+    const results = result.data as Array<{ content: string; score: number; type: string }>;
+    for (const r of results) {
+      expect(r).toHaveProperty('content');
+      expect(r).toHaveProperty('score');
+      expect(r).toHaveProperty('type');
+    }
+  });
+
+  test('should handle empty search query', async () => {
+    const result = await api.get(`/context/memories/search?projectId=${projectId}&q=`);
+    expect(result.success).toBe(true);
+    expect(Array.isArray(result.data)).toBe(true);
+    expect((result.data as unknown[]).length).toBe(0);
+  });
+
+  test('should refresh project index', async () => {
+    const result = await api.post(`/context/refresh?projectId=${projectId}`);
+    expect(result.success).toBe(true);
+    // May return null if no index exists yet
+  });
+});
+
+// ============================================
 // Health Check Tests
 // ============================================
 
