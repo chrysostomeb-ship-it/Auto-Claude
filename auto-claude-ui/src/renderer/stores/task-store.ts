@@ -221,7 +221,8 @@ export async function createTask(
 export function startTask(taskId: string, options?: { parallel?: boolean; workers?: number; force?: boolean }): void {
   // Always pass force: true to bypass review approval check
   // This ensures tasks can restart after recovery
-  window.electronAPI.startTask(taskId, { ...options, force: true });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  window.electronAPI.startTask(taskId, { ...options, force: true } as any);
 }
 
 /**

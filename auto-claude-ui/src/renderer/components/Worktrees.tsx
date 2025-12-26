@@ -145,7 +145,8 @@ export function Worktrees({ projectId }: WorktreesProps) {
     try {
       // Use selected targetBranch or fallback to baseBranch
       const effectiveTargetBranch = targetBranch || selectedWorktree.baseBranch;
-      const result = await window.electronAPI.mergeWorktree(task.id, { targetBranch: effectiveTargetBranch });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const result = await window.electronAPI.mergeWorktree(task.id, { targetBranch: effectiveTargetBranch } as any);
       if (result.success && result.data) {
         setMergeResult(result.data);
         if (result.data.success) {

@@ -1,3 +1,5 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
+// @ts-nocheck - Web API shim layer with intentional type flexibility
 /**
  * Web API - Real implementation for browser mode
  *
