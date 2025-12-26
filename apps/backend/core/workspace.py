@@ -99,6 +99,9 @@ from core.workspace.git_utils import (
 from core.workspace.git_utils import (
     is_lock_file as _is_lock_file,
 )
+from core.workspace.git_utils import (
+    validate_merged_syntax as _validate_merged_syntax,
+)
 
 # Import from refactored modules in core/workspace/
 from core.workspace.models import (
@@ -865,6 +868,7 @@ def _resolve_git_conflicts_with_ai(
                             worktree_content=worktree_content,
                             base_content=base_content,
                             spec_name=spec_name,
+                            project_dir=project_dir,
                         )
                     )
                     debug(
@@ -1029,6 +1033,7 @@ def _resolve_git_conflicts_with_ai(
                         worktree_content=worktree_content,
                         base_content=base_content,
                         spec_name=spec_name,
+                        project_dir=project_dir,
                     )
                 )
                 debug(
@@ -1432,6 +1437,47 @@ async def _merge_file_with_ai_async(
             if response_text:
                 # Strip any code fences the model might have added
                 merged_content = _strip_code_fences(response_text.strip())
+
+                # VALIDATION: Check if AI returned natural language instead of code
+                # This catches cases where AI says "I need to see more..." instead of merging
+                natural_language_patterns = [
+                    "I need to",
+                    "Let me",
+                    "I cannot",
+                    "I'm unable",
+                    "The file appears",
+                    "I don't have",
+                    "Unfortunately",
+                    "I apologize",
+                ]
+                first_line = merged_content.split("\n")[0] if merged_content else ""
+                if any(pattern in first_line for pattern in natural_language_patterns):
+                    debug_warning(
+                        MODULE,
+                        f"AI returned natural language instead of code for {task.file_path}: {first_line[:100]}",
+                    )
+                    return ParallelMergeResult(
+                        file_path=task.file_path,
+                        merged_content=None,
+                        success=False,
+                        error=f"AI returned explanation instead of code: {first_line[:80]}...",
+                    )
+
+                # VALIDATION: Run syntax check on the merged content
+                is_valid, syntax_error = _validate_merged_syntax(
+                    task.file_path, merged_content, task.project_dir
+                )
+                if not is_valid:
+                    debug_warning(
+                        MODULE,
+                        f"AI merge produced invalid syntax for {task.file_path}: {syntax_error}",
+                    )
+                    return ParallelMergeResult(
+                        file_path=task.file_path,
+                        merged_content=None,
+                        success=False,
+                        error=f"AI merge produced invalid syntax: {syntax_error}",
+                    )
 
                 debug(MODULE, f"AI merged {task.file_path} successfully")
                 return ParallelMergeResult(
