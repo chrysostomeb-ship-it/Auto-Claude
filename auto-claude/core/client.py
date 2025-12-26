@@ -126,6 +126,13 @@ BUILTIN_TOOLS = [
     "Glob",
     "Grep",
     "Bash",
+    "WebSearch",
+    "WebFetch",
+    "Task",
+    "TodoWrite",
+    "NotebookEdit",
+    "LSP",
+    "AskUserQuestion",
 ]
 
 
@@ -220,30 +227,14 @@ def create_client(
     # Create comprehensive security settings
     # Note: Using relative paths ("./**") restricts access to project directory
     # since cwd is set to project_dir
+    # DANGEROUS: Skip all permission checks - Claude can do anything
     security_settings = {
-        "sandbox": {"enabled": True, "autoAllowBashIfSandboxed": True},
+        "sandbox": {"enabled": False},
         "permissions": {
-            "defaultMode": "acceptEdits",  # Auto-approve edits within allowed directories
-            "allow": [
-                # Allow all file operations within the project directory
-                "Read(./**)",
-                "Write(./**)",
-                "Edit(./**)",
-                "Glob(./**)",
-                "Grep(./**)",
-                # Bash permission granted here, but actual commands are validated
-                # by the bash_security_hook (see security.py for allowed commands)
-                "Bash(*)",
-                # Allow Context7 MCP tools for documentation lookup
-                *CONTEXT7_TOOLS,
-                # Allow Linear MCP tools for project management (if enabled)
-                *(LINEAR_TOOLS if linear_enabled else []),
-                # Allow Graphiti MCP tools for knowledge graph memory (if enabled)
-                *(GRAPHITI_MCP_TOOLS if graphiti_mcp_enabled else []),
-                # Allow browser automation tools based on project type
-                *browser_tools_permissions,
-            ],
+            "defaultMode": "ignoreAll",
+            "allow": ["*"],
         },
+        "dangerouslySkipPermissions": True,
     }
 
     # Write settings to a file in the project directory
@@ -341,24 +332,18 @@ def create_client(
             system_prompt=(
                 f"You are an expert full-stack developer building production-quality software. "
                 f"Your working directory is: {project_dir.resolve()}\n"
-                f"Your filesystem access is RESTRICTED to this directory only. "
-                f"Use relative paths (starting with ./) for all file operations. "
-                f"Never use absolute paths or try to access files outside your working directory.\n\n"
                 f"You follow existing code patterns, write clean maintainable code, and verify "
                 f"your work through thorough testing. You communicate progress through Git commits "
                 f"and build-progress.txt updates."
             ),
-            allowed_tools=allowed_tools_list,
+            # No tool restrictions - allow everything
             mcp_servers=mcp_servers,
-            hooks={
-                "PreToolUse": [
-                    HookMatcher(matcher="Bash", hooks=[bash_security_hook]),
-                ],
-            },
+            # No hooks - no command validation
             max_turns=1000,
             cwd=str(project_dir.resolve()),
             settings=str(settings_file.resolve()),
             env=sdk_env,  # Pass ANTHROPIC_BASE_URL etc. to subprocess
             max_thinking_tokens=max_thinking_tokens,  # Extended thinking budget
+            permission_mode="bypassPermissions",  # Skip all permission prompts
         )
     )

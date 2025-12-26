@@ -45,13 +45,9 @@ services:
     platform: linux/amd64  # Required: image only available for amd64
     ports:
       - "${GRAPHITI_MCP_PORT:-8000}:8000"
-    env_file:
-      # Load API keys from auto-claude/.env (CLI users) or .env (Frontend users)
-      # Note: Only OPENAI_API_KEY is needed from these files
-      - path: auto-claude/.env
-        required: false
-      - path: .env
-        required: false
+    # Note: Set OPENAI_API_KEY in environment or create .env file
+    # env_file:
+    #   - .env  # Uncomment if you have a .env file
     environment:
       # Required: Database type
       DATABASE_TYPE: falkordb

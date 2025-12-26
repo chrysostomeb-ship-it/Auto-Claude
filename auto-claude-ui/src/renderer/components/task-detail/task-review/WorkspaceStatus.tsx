@@ -1,3 +1,4 @@
+import { useState, useEffect } from 'react';
 import {
   GitBranch,
   FileCode,
@@ -12,12 +13,26 @@ import {
   AlertTriangle,
   CheckCircle,
   GitCommit,
-  Terminal
+  Terminal,
+  ChevronDown
 } from 'lucide-react';
 import { Button } from '../../ui/button';
 import { Checkbox } from '../../ui/checkbox';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '../../ui/select';
 import { cn } from '../../../lib/utils';
 import type { Task, WorktreeStatus, MergeConflict, MergeStats, GitConflictInfo } from '../../../../shared/types';
+
+interface Branch {
+  name: string;
+  isRemote: boolean;
+  isCurrent: boolean;
+}
 
 interface WorkspaceStatusProps {
   task: Task;
@@ -28,6 +43,8 @@ interface WorkspaceStatusProps {
   isLoadingPreview: boolean;
   isMerging: boolean;
   isDiscarding: boolean;
+  targetBranch?: string;
+  onTargetBranchChange?: (branch: string) => void;
   onShowDiffDialog: (show: boolean) => void;
   onShowDiscardDialog: (show: boolean) => void;
   onShowConflictDialog: (show: boolean) => void;
@@ -48,6 +65,8 @@ export function WorkspaceStatus({
   isLoadingPreview,
   isMerging,
   isDiscarding,
+  targetBranch,
+  onTargetBranchChange,
   onShowDiffDialog,
   onShowDiscardDialog,
   onShowConflictDialog,
@@ -55,9 +74,33 @@ export function WorkspaceStatus({
   onStageOnlyChange,
   onMerge
 }: WorkspaceStatusProps) {
+  const [branches, setBranches] = useState<Branch[]>([]);
+  const [isLoadingBranches, setIsLoadingBranches] = useState(false);
+
+  // Fetch branches on mount
+  useEffect(() => {
+    const fetchBranches = async () => {
+      setIsLoadingBranches(true);
+      try {
+        const result = await window.electronAPI.getChangelogBranches(task.projectId || '');
+        if (result.success && result.data) {
+          // Filter to only local branches (not remote refs)
+          const localBranches = result.data.filter((b: Branch) => !b.isRemote && b.name !== 'origin');
+          setBranches(localBranches);
+        }
+      } catch (err) {
+        console.error('Failed to fetch branches:', err);
+      } finally {
+        setIsLoadingBranches(false);
+      }
+    };
+    fetchBranches();
+  }, [task.projectId]);
+
   const hasGitConflicts = mergePreview?.gitConflicts?.hasConflicts;
   const hasUncommittedChanges = mergePreview?.uncommittedChanges?.hasChanges;
   const uncommittedCount = mergePreview?.uncommittedChanges?.count || 0;
+  const effectiveTargetBranch = targetBranch || worktreeStatus.baseBranch || 'main';
   const hasAIConflicts = mergePreview && mergePreview.conflicts.length > 0;
 
   // Determine overall status
@@ -127,12 +170,32 @@ export function WorkspaceStatus({
           </span>
         </div>
 
-        {/* Branch info */}
+        {/* Branch info with selector */}
         {worktreeStatus.branch && (
-          <div className="mt-2 text-xs text-muted-foreground">
+          <div className="mt-2 flex items-center gap-1.5 text-xs text-muted-foreground">
             <code className="bg-background/80 px-1.5 py-0.5 rounded text-[11px]">{worktreeStatus.branch}</code>
-            <span className="mx-1.5">→</span>
-            <code className="bg-background/80 px-1.5 py-0.5 rounded text-[11px]">{worktreeStatus.baseBranch || 'main'}</code>
+            <span className="mx-1">→</span>
+            {onTargetBranchChange && branches.length > 0 ? (
+              <Select
+                value={effectiveTargetBranch}
+                onValueChange={onTargetBranchChange}
+                disabled={isLoadingBranches || isMerging}
+              >
+                <SelectTrigger className="h-6 w-auto min-w-[100px] text-[11px] bg-background/80 border-0 px-1.5 py-0.5">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {branches.map((branch) => (
+                    <SelectItem key={branch.name} value={branch.name} className="text-xs">
+                      {branch.name}
+                      {branch.isCurrent && <span className="ml-1 text-muted-foreground">(current)</span>}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            ) : (
+              <code className="bg-background/80 px-1.5 py-0.5 rounded text-[11px]">{effectiveTargetBranch}</code>
+            )}
           </div>
         )}
       </div>
@@ -295,7 +358,7 @@ export function WorkspaceStatus({
                 <GitMerge className="mr-2 h-4 w-4" />
                 {hasGitConflicts
                   ? (stageOnly ? 'Stage with AI Merge' : 'Merge with AI')
-                  : (stageOnly ? 'Stage Changes' : 'Merge to Main')}
+                  : (stageOnly ? 'Stage Changes' : `Merge to ${effectiveTargetBranch}`)}
               </>
             )}
           </Button>

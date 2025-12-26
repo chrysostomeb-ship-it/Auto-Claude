@@ -46,6 +46,7 @@ export function useTaskDetail({ task }: UseTaskDetailOptions) {
   } | null>(null);
   const [isLoadingPreview, setIsLoadingPreview] = useState(false);
   const [showConflictDialog, setShowConflictDialog] = useState(false);
+  const [targetBranch, setTargetBranch] = useState<string | undefined>(undefined);
 
   const selectedProject = useProjectStore((state) => state.getSelectedProject());
   const isRunning = task.status === 'in_progress' || task.status === 'ai_review';
@@ -296,6 +297,7 @@ export function useTaskDetail({ task }: UseTaskDetailOptions) {
     mergePreview,
     isLoadingPreview,
     showConflictDialog,
+    targetBranch,
 
     // Setters
     setFeedback,
@@ -327,6 +329,7 @@ export function useTaskDetail({ task }: UseTaskDetailOptions) {
     setMergePreview,
     setIsLoadingPreview,
     setShowConflictDialog,
+    setTargetBranch,
 
     // Handlers
     handleLogsScroll,

@@ -12,9 +12,13 @@ import cors from 'cors';
 import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
-import { spawn, ChildProcess } from 'child_process';
+import { spawn, ChildProcess, exec } from 'child_process';
+import { promisify } from 'util';
 import * as pty from '@lydell/node-pty';
 import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, unlinkSync, rmdirSync } from 'fs';
+import Redis from 'ioredis';
+
+const execAsync = promisify(exec);
 
 const PORT = process.env.PORT || 8080;
 const app = express();
@@ -62,9 +66,518 @@ interface RunningTask {
 }
 const runningTasks = new Map<string, RunningTask>();
 
+// Log watching for real-time updates
+interface LogWatcher {
+  specId: string;
+  projectPath: string;
+  lastContent: string;
+  lastWorktreeContent: string;
+  interval: NodeJS.Timeout;
+}
+const logWatchers = new Map<string, LogWatcher>();
+
+// ============ FalkorDB / Graphiti Integration ============
+const FALKORDB_CONTAINER_NAME = 'auto-claude-falkordb';
+const FALKORDB_IMAGE = 'falkordb/falkordb:latest';
+const FALKORDB_DEFAULT_PORT = 6380;
+
+interface FalkorDBStatus {
+  available: boolean;
+  enabled: boolean;
+  host: string;
+  port: number;
+  database: string;
+  reason?: string;
+  containerRunning?: boolean;
+}
+
+let falkordbRedis: Redis | null = null;
+let falkordbStatus: FalkorDBStatus = {
+  available: false,
+  enabled: false,
+  host: 'localhost',
+  port: FALKORDB_DEFAULT_PORT,
+  database: 'auto_claude_memory',
+  reason: 'Not initialized',
+};
+
+async function checkDockerAvailable(): Promise<boolean> {
+  try {
+    await execAsync('docker info', { timeout: 5000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function checkFalkorDBContainer(): Promise<{ exists: boolean; running: boolean; port: number }> {
+  try {
+    const { stdout } = await execAsync(
+      `docker ps -a --filter "name=${FALKORDB_CONTAINER_NAME}" --format "{{.Status}}"`,
+      { timeout: 5000 }
+    );
+    const status = stdout.trim();
+    if (!status) {
+      return { exists: false, running: false, port: FALKORDB_DEFAULT_PORT };
+    }
+
+    const running = status.toLowerCase().startsWith('up');
+
+    // Get port mapping
+    let port = FALKORDB_DEFAULT_PORT;
+    if (running) {
+      try {
+        const { stdout: portOut } = await execAsync(
+          `docker port ${FALKORDB_CONTAINER_NAME} 6379`,
+          { timeout: 5000 }
+        );
+        const match = portOut.match(/:(\d+)/);
+        if (match) port = parseInt(match[1], 10);
+      } catch {}
+    }
+
+    return { exists: true, running, port };
+  } catch {
+    return { exists: false, running: false, port: FALKORDB_DEFAULT_PORT };
+  }
+}
+
+async function startFalkorDBContainer(): Promise<boolean> {
+  try {
+    const containerStatus = await checkFalkorDBContainer();
+
+    if (containerStatus.running) {
+      console.log('[FalkorDB] Container already running');
+      return true;
+    }
+
+    if (containerStatus.exists) {
+      console.log('[FalkorDB] Starting existing container...');
+      await execAsync(`docker start ${FALKORDB_CONTAINER_NAME}`, { timeout: 30000 });
+    } else {
+      console.log('[FalkorDB] Creating and starting new container...');
+      await execAsync(
+        `docker run -d --name ${FALKORDB_CONTAINER_NAME} -p ${FALKORDB_DEFAULT_PORT}:6379 ${FALKORDB_IMAGE}`,
+        { timeout: 60000 }
+      );
+    }
+
+    // Wait for container to be ready
+    for (let i = 0; i < 30; i++) {
+      await new Promise((r) => setTimeout(r, 1000));
+      try {
+        const { stdout } = await execAsync(
+          `docker exec ${FALKORDB_CONTAINER_NAME} redis-cli PING`,
+          { timeout: 5000 }
+        );
+        if (stdout.trim().toUpperCase() === 'PONG') {
+          console.log('[FalkorDB] Container ready');
+          return true;
+        }
+      } catch {}
+    }
+    return false;
+  } catch (error) {
+    console.error('[FalkorDB] Failed to start container:', error);
+    return false;
+  }
+}
+
+async function connectToFalkorDB(): Promise<boolean> {
+  try {
+    if (falkordbRedis) {
+      await falkordbRedis.quit();
+      falkordbRedis = null;
+    }
+
+    const containerStatus = await checkFalkorDBContainer();
+    if (!containerStatus.running) {
+      return false;
+    }
+
+    falkordbRedis = new Redis({
+      host: 'localhost',
+      port: containerStatus.port,
+      lazyConnect: true,
+      connectTimeout: 5000,
+      maxRetriesPerRequest: 1,
+    });
+
+    await falkordbRedis.connect();
+    await falkordbRedis.ping();
+
+    falkordbStatus = {
+      available: true,
+      enabled: true,
+      host: 'localhost',
+      port: containerStatus.port,
+      database: 'auto_claude_memory',
+      containerRunning: true,
+    };
+
+    console.log(`[FalkorDB] Connected on port ${containerStatus.port}`);
+    return true;
+  } catch (error) {
+    console.error('[FalkorDB] Connection failed:', error);
+    falkordbStatus = {
+      available: false,
+      enabled: false,
+      host: 'localhost',
+      port: FALKORDB_DEFAULT_PORT,
+      database: 'auto_claude_memory',
+      reason: error instanceof Error ? error.message : 'Connection failed',
+    };
+    return false;
+  }
+}
+
+async function initializeFalkorDB(): Promise<void> {
+  console.log('[FalkorDB] Initializing...');
+
+  const dockerAvailable = await checkDockerAvailable();
+  if (!dockerAvailable) {
+    console.log('[FalkorDB] Docker not available');
+    falkordbStatus = {
+      available: false,
+      enabled: false,
+      host: 'localhost',
+      port: FALKORDB_DEFAULT_PORT,
+      database: 'auto_claude_memory',
+      reason: 'Docker is not installed or not running',
+    };
+    return;
+  }
+
+  const containerStatus = await checkFalkorDBContainer();
+
+  if (!containerStatus.running) {
+    console.log('[FalkorDB] Container not running, attempting to start...');
+    const started = await startFalkorDBContainer();
+    if (!started) {
+      falkordbStatus = {
+        available: false,
+        enabled: false,
+        host: 'localhost',
+        port: FALKORDB_DEFAULT_PORT,
+        database: 'auto_claude_memory',
+        reason: 'Failed to start FalkorDB container',
+      };
+      return;
+    }
+  }
+
+  await connectToFalkorDB();
+}
+
+async function queryFalkorDB(graphName: string, query: string): Promise<unknown[]> {
+  if (!falkordbRedis) {
+    throw new Error('FalkorDB not connected');
+  }
+  return (await falkordbRedis.call('GRAPH.QUERY', graphName, query)) as unknown[];
+}
+
+async function listFalkorDBGraphs(): Promise<string[]> {
+  if (!falkordbRedis) {
+    return [];
+  }
+  try {
+    return (await falkordbRedis.call('GRAPH.LIST')) as string[];
+  } catch {
+    return [];
+  }
+}
+
+interface MemoryEpisode {
+  id: string;
+  type: string;
+  timestamp: string;
+  content: string;
+  session_number?: number;
+  score?: number;
+}
+
+function parseGraphResult(result: unknown[]): Record<string, unknown>[] {
+  if (!Array.isArray(result) || result.length < 2) return [];
+  const headers = result[0] as string[];
+  const rows = result[1] as unknown[][];
+  if (!Array.isArray(headers) || !Array.isArray(rows)) return [];
+  return rows.map(row => {
+    const obj: Record<string, unknown> = {};
+    headers.forEach((header, idx) => { obj[header] = row[idx]; });
+    return obj;
+  });
+}
+
+async function getFalkorDBMemories(limit: number = 20): Promise<MemoryEpisode[]> {
+  if (!falkordbRedis || !falkordbStatus.available) {
+    console.log('[Memory] FalkorDB not available, skipping graph query');
+    return [];
+  }
+
+  const graphs = await listFalkorDBGraphs();
+  console.log(`[Memory] Found ${graphs.length} graphs in FalkorDB:`, graphs);
+
+  const memories: MemoryEpisode[] = [];
+
+  // Filter to spec-related graphs
+  const specGraphs = graphs.filter(g =>
+    !g.startsWith('project_') && g !== 'auto_build_memory' && g !== 'default_db'
+  );
+  console.log(`[Memory] Querying ${specGraphs.length} spec graphs:`, specGraphs);
+
+  for (const graph of specGraphs) {
+    try {
+      const query = `
+        MATCH (e:Episodic)
+        RETURN e.uuid as uuid, e.name as name, e.created_at as created_at,
+               e.content as content, e.source_description as description
+        ORDER BY e.created_at DESC
+        LIMIT ${Math.ceil(limit / Math.max(specGraphs.length, 1))}
+      `;
+      const result = await queryFalkorDB(graph, query);
+      const episodes = parseGraphResult(result);
+      console.log(`[Memory] Graph "${graph}": found ${episodes.length} episodic memories`);
+
+      for (const ep of episodes) {
+        memories.push({
+          id: `${graph}:${ep.uuid || ep.name}`,
+          type: inferEpisodeType(String(ep.name || ''), String(ep.content || '')),
+          timestamp: String(ep.created_at || new Date().toISOString()),
+          content: String(ep.content || ep.description || ep.name || ''),
+          session_number: extractSessionNumber(String(ep.name || '')),
+        });
+      }
+    } catch (err) {
+      console.error(`[Memory] Failed to get memories from ${graph}:`, err);
+    }
+  }
+
+  memories.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+  console.log(`[Memory] Total memories retrieved: ${memories.length}`);
+  return memories.slice(0, limit);
+}
+
+async function searchFalkorDBMemories(query: string, limit: number = 20): Promise<MemoryEpisode[]> {
+  if (!falkordbRedis || !falkordbStatus.available) return [];
+
+  const graphs = await listFalkorDBGraphs();
+  const results: MemoryEpisode[] = [];
+  const queryLower = query.toLowerCase().replace(/'/g, "\\'");
+
+  const specGraphs = graphs.filter(g =>
+    !g.startsWith('project_') && g !== 'auto_build_memory' && g !== 'default_db'
+  );
+
+  for (const graph of specGraphs) {
+    try {
+      const cypher = `
+        MATCH (e:Episodic)
+        WHERE toLower(e.name) CONTAINS '${queryLower}' OR toLower(e.content) CONTAINS '${queryLower}'
+        RETURN e.uuid as uuid, e.name as name, e.created_at as created_at,
+               e.content as content, e.source_description as description
+        LIMIT ${Math.ceil(limit / Math.max(specGraphs.length, 1))}
+      `;
+      const result = await queryFalkorDB(graph, cypher);
+      const episodes = parseGraphResult(result);
+
+      for (const ep of episodes) {
+        results.push({
+          id: `${graph}:${ep.uuid || ep.name}`,
+          type: inferEpisodeType(String(ep.name || ''), String(ep.content || '')),
+          timestamp: String(ep.created_at || new Date().toISOString()),
+          content: String(ep.content || ep.description || ep.name || ''),
+          score: 1.0,
+        });
+      }
+    } catch (err) {
+      console.error(`Failed to search memories in ${graph}:`, err);
+    }
+  }
+
+  return results.slice(0, limit);
+}
+
+function inferEpisodeType(name: string, content: string): string {
+  const nameLower = name.toLowerCase();
+  const contentLower = content.toLowerCase();
+  if (nameLower.includes('session_') || contentLower.includes('"type": "session_insight"')) return 'session_insight';
+  if (nameLower.includes('pattern') || contentLower.includes('"type": "pattern"')) return 'pattern';
+  if (nameLower.includes('gotcha') || contentLower.includes('"type": "gotcha"')) return 'gotcha';
+  if (nameLower.includes('codebase') || contentLower.includes('"type": "codebase_discovery"')) return 'codebase_discovery';
+  return 'session_insight';
+}
+
+function extractSessionNumber(name: string): number | undefined {
+  const match = name.match(/session_(\d+)/i);
+  return match ? parseInt(match[1], 10) : undefined;
+}
+
+function loadFileBasedMemories(projectPath: string, limit: number): MemoryEpisode[] {
+  const memories: MemoryEpisode[] = [];
+  const specsDir = path.join(projectPath, '.auto-claude', 'specs');
+
+  console.log(`[Memory] Loading file-based memories from: ${specsDir}`);
+
+  if (!existsSync(specsDir)) {
+    console.log('[Memory] Specs directory does not exist');
+    return memories;
+  }
+
+  try {
+    // Get ALL spec directories
+    const allSpecDirs = readdirSync(specsDir)
+      .filter(f => statSync(path.join(specsDir, f)).isDirectory());
+
+    console.log(`[Memory] Found ${allSpecDirs.length} total spec directories`);
+
+    // Filter to specs that HAVE memory directories (completed sessions)
+    const specsWithMemory = allSpecDirs.filter(specDir => {
+      const memoryDir = path.join(specsDir, specDir, 'memory');
+      const hasMemory = existsSync(memoryDir);
+      return hasMemory;
+    });
+
+    console.log(`[Memory] Specs with memory directories: ${specsWithMemory.length}`, specsWithMemory.slice(0, 10));
+
+    // Sort by spec number (descending) and take top 10 specs with memories
+    const specDirs = specsWithMemory.sort().reverse().slice(0, 10);
+
+    for (const specDir of specDirs) {
+      const memoryDir = path.join(specsDir, specDir, 'memory');
+      console.log(`[Memory] Loading from: ${memoryDir}`);
+
+      // Load session insights
+      const sessionInsightsDir = path.join(memoryDir, 'session_insights');
+      console.log(`[Memory] Checking session_insights dir: ${sessionInsightsDir}, exists: ${existsSync(sessionInsightsDir)}`);
+      if (existsSync(sessionInsightsDir)) {
+        const sessionFiles = readdirSync(sessionInsightsDir)
+          .filter(f => f.startsWith('session_') && f.endsWith('.json'))
+          .sort().reverse();
+        console.log(`[Memory] Found ${sessionFiles.length} session files in ${specDir}`);
+
+        for (const sessionFile of sessionFiles.slice(0, 3)) {
+          try {
+            const sessionPath = path.join(sessionInsightsDir, sessionFile);
+            const sessionData = JSON.parse(readFileSync(sessionPath, 'utf-8'));
+            if (sessionData.session_number !== undefined) {
+              memories.push({
+                id: `${specDir}-${sessionFile}`,
+                type: 'session_insight',
+                timestamp: sessionData.timestamp || new Date().toISOString(),
+                content: JSON.stringify({
+                  discoveries: sessionData.discoveries,
+                  what_worked: sessionData.what_worked,
+                  what_failed: sessionData.what_failed,
+                  recommendations: sessionData.recommendations_for_next_session,
+                  subtasks_completed: sessionData.subtasks_completed
+                }, null, 2),
+                session_number: sessionData.session_number
+              });
+            }
+          } catch { /* skip */ }
+        }
+      }
+
+      // Load codebase map
+      const codebaseMapPath = path.join(memoryDir, 'codebase_map.json');
+      if (existsSync(codebaseMapPath)) {
+        try {
+          const mapData = JSON.parse(readFileSync(codebaseMapPath, 'utf-8'));
+          if (mapData.discovered_files && Object.keys(mapData.discovered_files).length > 0) {
+            memories.push({
+              id: `${specDir}-codebase_map`,
+              type: 'codebase_map',
+              timestamp: mapData.last_updated || new Date().toISOString(),
+              content: JSON.stringify(mapData.discovered_files, null, 2),
+            });
+          }
+        } catch { /* skip */ }
+      }
+    }
+  } catch { /* skip */ }
+
+  return memories.slice(0, limit);
+}
+
+function startLogWatching(specId: string, projectPath: string): void {
+  // Stop existing watcher if any
+  stopLogWatching(specId);
+
+  const specDir = path.join(projectPath, '.auto-claude', 'specs', specId);
+  const worktreeSpecDir = path.join(projectPath, '.worktrees', specId, '.auto-claude', 'specs', specId);
+
+  let lastContent = '';
+  let lastWorktreeContent = '';
+
+  // Load initial content
+  const mainLogFile = path.join(specDir, 'task_logs.json');
+  const worktreeLogFile = path.join(worktreeSpecDir, 'task_logs.json');
+
+  if (existsSync(mainLogFile)) {
+    try {
+      lastContent = readFileSync(mainLogFile, 'utf-8');
+    } catch {}
+  }
+  if (existsSync(worktreeLogFile)) {
+    try {
+      lastWorktreeContent = readFileSync(worktreeLogFile, 'utf-8');
+    } catch {}
+  }
+
+  // Poll for changes every second
+  const interval = setInterval(() => {
+    let changed = false;
+    let newLogs: unknown = null;
+
+    // Check main spec dir
+    if (existsSync(mainLogFile)) {
+      try {
+        const content = readFileSync(mainLogFile, 'utf-8');
+        if (content !== lastContent) {
+          lastContent = content;
+          changed = true;
+          newLogs = JSON.parse(content);
+        }
+      } catch {}
+    }
+
+    // Check worktree spec dir
+    if (existsSync(worktreeLogFile)) {
+      try {
+        const content = readFileSync(worktreeLogFile, 'utf-8');
+        if (content !== lastWorktreeContent) {
+          lastWorktreeContent = content;
+          changed = true;
+          newLogs = JSON.parse(content);
+        }
+      } catch {}
+    }
+
+    if (changed && newLogs) {
+      broadcast('task:logsChanged', { specId, logs: newLogs });
+    }
+  }, 1000);
+
+  logWatchers.set(specId, {
+    specId,
+    projectPath,
+    lastContent,
+    lastWorktreeContent,
+    interval
+  });
+}
+
+function stopLogWatching(specId: string): void {
+  const watcher = logWatchers.get(specId);
+  if (watcher) {
+    clearInterval(watcher.interval);
+    logWatchers.delete(specId);
+  }
+}
+
 // Middleware
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '50mb' }));
 
 // Disable caching for development
 app.use((_req, res, next) => {
@@ -326,11 +839,76 @@ app.get('/api/tasks', (req, res) => {
       }
 
       // Get status/subtasks from plan, and title if not found in spec.md
+      let reviewReason: string | undefined;
       if (existsSync(planPath)) {
         try {
           const plan = JSON.parse(readFileSync(planPath, 'utf-8'));
-          status = plan.status || 'in_progress';
-          subtasks = plan.subtasks || plan.phases || [];
+
+          // Extract subtasks from phases (like Electron app does)
+          // Handle both 'subtasks' and 'chunks' naming conventions
+          if (plan.phases && Array.isArray(plan.phases)) {
+            subtasks = plan.phases.flatMap((phase: { subtasks?: Array<{ id: string; description: string; status: string }>; chunks?: Array<{ id: string; description: string; status: string }> }) => {
+              const items = phase.subtasks || phase.chunks || [];
+              return items.map((subtask) => ({
+                id: subtask.id,
+                title: subtask.description,
+                description: subtask.description,
+                status: subtask.status || 'pending',
+                files: []
+              }));
+            });
+          }
+
+          // Calculate status based on subtask progress (like Electron app)
+          const allSubtasks = subtasks as Array<{ status: string }>;
+          if (allSubtasks.length > 0) {
+            const completed = allSubtasks.filter((s) => s.status === 'completed').length;
+            const inProgress = allSubtasks.filter((s) => s.status === 'in_progress').length;
+            const failed = allSubtasks.filter((s) => s.status === 'failed').length;
+
+            if (completed === allSubtasks.length) {
+              // All subtasks completed - check QA status
+              const qaSignoff = plan.qa_signoff as { status?: string } | undefined;
+              if (qaSignoff?.status === 'approved') {
+                status = 'human_review';
+                reviewReason = 'completed';
+              } else {
+                status = 'ai_review';
+              }
+            } else if (failed > 0) {
+              status = 'human_review';
+              reviewReason = 'errors';
+            } else if (inProgress > 0 || completed > 0) {
+              status = 'in_progress';
+            }
+          }
+
+          // Check QA report for status
+          const qaReportPath = path.join(specsDir, specName, 'qa_report.md');
+          if (existsSync(qaReportPath)) {
+            const qaContent = readFileSync(qaReportPath, 'utf-8');
+            if (qaContent.includes('REJECTED') || qaContent.includes('FAILED')) {
+              status = 'human_review';
+              reviewReason = 'qa_rejected';
+            } else if (qaContent.includes('PASSED') || qaContent.includes('APPROVED')) {
+              if (allSubtasks.length > 0 && allSubtasks.every((s) => s.status === 'completed')) {
+                status = 'human_review';
+                reviewReason = 'completed';
+              }
+            }
+          }
+
+          // Respect explicit plan status for 'done'
+          if (plan.status === 'done' || plan.status === 'completed') {
+            status = 'done';
+          } else if (plan.status === 'planning' || plan.status === 'coding') {
+            status = 'in_progress';
+          } else if (plan.status === 'human_review') {
+            status = 'human_review';
+          } else if (plan.status === 'ai_review') {
+            status = 'ai_review';
+          }
+
           // Get title from plan.feature if not found in spec.md
           if (title === specName && plan.feature) {
             title = plan.feature;
@@ -353,6 +931,7 @@ app.get('/api/tasks', (req, res) => {
         title,
         description,
         status: effectiveStatus,
+        reviewReason,
         subtasks,
         logs: [],
         specDir: path.join(specsDir, specName),
@@ -526,6 +1105,175 @@ app.get('/api/tasks/:id/review', (req, res) => {
   res.json({ success: true, data: { taskId, qaReport } });
 });
 
+// Submit task review (approve or reject with feedback)
+app.post('/api/tasks/:id/review', (req, res) => {
+  const taskId = req.params.id;
+  const { projectId, approved, feedback } = req.body;
+
+  const store = loadStore();
+  const project = store.projects.find((p) => p.id === projectId);
+
+  if (!project) {
+    return res.status(404).json({ success: false, error: 'Project not found' });
+  }
+
+  const specDir = path.join(project.path, '.auto-claude', 'specs', taskId);
+  const worktreePath = path.join(project.path, '.worktrees', taskId);
+  const worktreeSpecDir = path.join(worktreePath, '.auto-claude', 'specs', taskId);
+  const hasWorktree = existsSync(worktreePath);
+
+  if (approved) {
+    // Write approval to QA report
+    const qaReportPath = path.join(specDir, 'qa_report.md');
+    writeFileSync(
+      qaReportPath,
+      `# QA Review\n\nStatus: APPROVED\n\nReviewed at: ${new Date().toISOString()}\n`
+    );
+
+    // Update plan status to done
+    const planPath = path.join(specDir, 'implementation_plan.json');
+    if (existsSync(planPath)) {
+      try {
+        const plan = JSON.parse(readFileSync(planPath, 'utf-8'));
+        plan.status = 'human_review';
+        plan.qa_signoff = { status: 'approved', timestamp: new Date().toISOString() };
+        writeFileSync(planPath, JSON.stringify(plan, null, 2));
+      } catch {}
+    }
+
+    broadcast('task:statusChange', { taskId, status: 'human_review' });
+    res.json({ success: true });
+  } else {
+    // Write feedback for QA fixer - write to WORKTREE spec dir if it exists
+    const targetSpecDir = hasWorktree ? worktreeSpecDir : specDir;
+    const fixRequestPath = path.join(targetSpecDir, 'QA_FIX_REQUEST.md');
+
+    console.log('[Review] Writing QA fix request to:', fixRequestPath);
+    writeFileSync(
+      fixRequestPath,
+      `# QA Fix Request\n\nStatus: REJECTED\n\n## Feedback\n\n${feedback || 'No feedback provided'}\n\nCreated at: ${new Date().toISOString()}\n`
+    );
+
+    // Also write to main spec dir for visibility
+    if (hasWorktree) {
+      const mainFixRequestPath = path.join(specDir, 'QA_FIX_REQUEST.md');
+      writeFileSync(mainFixRequestPath, readFileSync(fixRequestPath, 'utf-8'));
+    }
+
+    // Update plan status back to in_progress
+    const planPath = path.join(hasWorktree ? worktreeSpecDir : specDir, 'implementation_plan.json');
+    if (existsSync(planPath)) {
+      try {
+        const plan = JSON.parse(readFileSync(planPath, 'utf-8'));
+        plan.status = 'in_progress';
+        plan.qa_signoff = { status: 'rejected', feedback, timestamp: new Date().toISOString() };
+        writeFileSync(planPath, JSON.stringify(plan, null, 2));
+      } catch {}
+    }
+
+    // Restart the task - use --qa for complete builds, --auto-continue for incomplete
+    const autoBuildPath = getAutoBuildPath();
+    if (autoBuildPath) {
+      const pythonPath = path.join(autoBuildPath, '.venv', 'bin', 'python');
+      const runScript = path.join(autoBuildPath, 'run.py');
+
+      // Kill existing task if running
+      if (runningTasks.has(taskId)) {
+        runningTasks.get(taskId)?.process.kill();
+        runningTasks.delete(taskId);
+      }
+
+      // Check if build is complete by counting subtasks
+      let buildComplete = false;
+      const planCheckPath = path.join(hasWorktree ? worktreeSpecDir : specDir, 'implementation_plan.json');
+      if (existsSync(planCheckPath)) {
+        try {
+          const planCheck = JSON.parse(readFileSync(planCheckPath, 'utf-8'));
+          const allSubtasks = (planCheck.phases || []).flatMap((p: { subtasks?: Array<{ status: string }>; chunks?: Array<{ status: string }> }) =>
+            p.subtasks || p.chunks || []
+          );
+          const completedCount = allSubtasks.filter((s: { status: string }) => s.status === 'completed').length;
+          buildComplete = allSubtasks.length > 0 && completedCount === allSubtasks.length;
+          console.log(`[Review] Build progress: ${completedCount}/${allSubtasks.length}, complete: ${buildComplete}`);
+
+          // Reset in_progress subtasks to pending so they get picked up
+          let modified = false;
+          for (const phase of planCheck.phases || []) {
+            const items = phase.subtasks || phase.chunks || [];
+            for (const item of items) {
+              if (item.status === 'in_progress') {
+                item.status = 'pending';
+                modified = true;
+              }
+            }
+          }
+          if (modified) {
+            writeFileSync(planCheckPath, JSON.stringify(planCheck, null, 2));
+            console.log('[Review] Reset in_progress subtasks to pending');
+          }
+        } catch {}
+      }
+
+      // Use --qa for complete builds (runs QA fixer), --auto-continue for incomplete (resumes coding)
+      const args = buildComplete
+        ? [runScript, '--spec', taskId, '--qa', '--auto-continue']
+        : [runScript, '--spec', taskId, '--auto-continue', '--force'];
+      console.log('[Review] Starting task with feedback:', { pythonPath, args, cwd: project.path, buildComplete });
+
+      const child = spawn(pythonPath, args, {
+        cwd: project.path,
+        env: { ...process.env, PYTHONUNBUFFERED: '1' }
+      });
+
+      runningTasks.set(taskId, {
+        taskId,
+        process: child,
+        projectPath: project.path
+      });
+
+      startLogWatching(taskId, project.path);
+      broadcast('task:statusChange', { taskId, status: 'in_progress' });
+
+      child.stdout?.on('data', (data) => {
+        const log = data.toString();
+        console.log('[QA stdout]', taskId, log.substring(0, 200));
+        broadcast('task:log', { taskId, log });
+      });
+
+      child.stderr?.on('data', (data) => {
+        const log = data.toString();
+        console.log('[QA stderr]', taskId, log.substring(0, 200));
+        broadcast('task:log', { taskId, log });
+      });
+
+      child.on('exit', (code) => {
+        console.log('[QA exit]', taskId, 'code:', code);
+        runningTasks.delete(taskId);
+        stopLogWatching(taskId);
+        broadcast('task:exit', { taskId, code });
+
+        // Always go back to human_review so user can retry or merge
+        // Don't leave in in_progress which causes "stuck" state
+        const finalStatus = 'human_review';
+
+        // Update plan status
+        const exitPlanPath = path.join(hasWorktree ? worktreeSpecDir : specDir, 'implementation_plan.json');
+        if (existsSync(exitPlanPath)) {
+          try {
+            const exitPlan = JSON.parse(readFileSync(exitPlanPath, 'utf-8'));
+            exitPlan.status = finalStatus;
+            writeFileSync(exitPlanPath, JSON.stringify(exitPlan, null, 2));
+          } catch {}
+        }
+
+        broadcast('task:statusChange', { taskId, status: finalStatus });
+      });
+    }
+
+    res.json({ success: true });
+  }
+});
+
 // Archive task
 app.post('/api/tasks/:id/archive', (req, res) => {
   const taskId = req.params.id;
@@ -578,7 +1326,7 @@ app.post('/api/tasks/:id/unarchive', (req, res) => {
   res.json({ success: true });
 });
 
-// List worktrees
+// List worktrees - matches Electron's TASK_LIST_WORKTREES
 app.get('/api/worktrees', (req, res) => {
   const { projectId } = req.query;
 
@@ -589,23 +1337,101 @@ app.get('/api/worktrees', (req, res) => {
     return res.status(404).json({ success: false, error: 'Project not found' });
   }
 
+  const { execSync } = require('child_process');
   const worktreesDir = path.join(project.path, '.worktrees');
-  const worktrees: unknown[] = [];
 
-  if (existsSync(worktreesDir)) {
-    const dirs = readdirSync(worktreesDir, { withFileTypes: true })
-      .filter(d => d.isDirectory())
-      .map(d => d.name);
+  interface WorktreeInfo {
+    specName: string;
+    path: string;
+    branch: string;
+    baseBranch: string;
+    commitCount: number;
+    filesChanged: number;
+    additions: number;
+    deletions: number;
+  }
+  const worktrees: WorktreeInfo[] = [];
 
-    for (const dir of dirs) {
+  if (!existsSync(worktreesDir)) {
+    return res.json({ success: true, data: { worktrees } });
+  }
+
+  // Get base branch from main project
+  let baseBranch = 'main';
+  try {
+    baseBranch = execSync('git rev-parse --abbrev-ref HEAD', {
+      cwd: project.path,
+      encoding: 'utf-8'
+    }).trim();
+  } catch {
+    baseBranch = 'main';
+  }
+
+  const dirs = readdirSync(worktreesDir, { withFileTypes: true })
+    .filter(d => d.isDirectory() && !d.name.startsWith('worker-'))
+    .map(d => d.name);
+
+  for (const dir of dirs) {
+    const entryPath = path.join(worktreesDir, dir);
+
+    try {
+      // Get branch info
+      const branch = execSync('git rev-parse --abbrev-ref HEAD', {
+        cwd: entryPath,
+        encoding: 'utf-8'
+      }).trim();
+
+      // Get commit count
+      let commitCount = 0;
+      try {
+        const countOutput = execSync(`git rev-list --count ${baseBranch}..HEAD 2>/dev/null || echo 0`, {
+          cwd: entryPath,
+          encoding: 'utf-8'
+        }).trim();
+        commitCount = parseInt(countOutput, 10) || 0;
+      } catch {
+        commitCount = 0;
+      }
+
+      // Get diff stats
+      let filesChanged = 0;
+      let additions = 0;
+      let deletions = 0;
+
+      try {
+        const diffStat = execSync(`git diff --shortstat ${baseBranch}...HEAD 2>/dev/null || echo ""`, {
+          cwd: entryPath,
+          encoding: 'utf-8'
+        }).trim();
+
+        const filesMatch = diffStat.match(/(\d+) files? changed/);
+        const addMatch = diffStat.match(/(\d+) insertions?/);
+        const delMatch = diffStat.match(/(\d+) deletions?/);
+
+        if (filesMatch) filesChanged = parseInt(filesMatch[1], 10) || 0;
+        if (addMatch) additions = parseInt(addMatch[1], 10) || 0;
+        if (delMatch) deletions = parseInt(delMatch[1], 10) || 0;
+      } catch {
+        // Ignore diff errors
+      }
+
       worktrees.push({
-        name: dir,
-        path: path.join(worktreesDir, dir)
+        specName: dir,
+        path: entryPath,
+        branch,
+        baseBranch,
+        commitCount,
+        filesChanged,
+        additions,
+        deletions
       });
+    } catch (gitError) {
+      console.error(`Error getting info for worktree ${dir}:`, gitError);
+      // Skip this worktree if we can't get git info
     }
   }
 
-  res.json({ success: true, data: worktrees });
+  res.json({ success: true, data: { worktrees } });
 });
 
 app.post('/api/tasks/:id/start', (req, res) => {
@@ -638,7 +1464,8 @@ app.post('/api/tasks/:id/start', (req, res) => {
   const args = [runScript, '--spec', taskId, '--auto-continue'];
 
   // Add --force flag if requested (bypasses review approval check)
-  if (options?.force) {
+  // Accept force at top level or in options
+  if (options?.force || req.body.force) {
     args.push('--force');
   }
 
@@ -685,6 +1512,9 @@ app.post('/api/tasks/:id/start', (req, res) => {
   // Broadcast status change to 'in_progress' when task starts
   broadcast('task:statusChange', { taskId, status: 'in_progress' });
 
+  // Start watching logs for real-time updates
+  startLogWatching(taskId, project.path);
+
   child.stdout?.on('data', (data) => {
     const log = data.toString();
     console.log('[Task stdout]', taskId, log.substring(0, 200));
@@ -720,6 +1550,7 @@ app.post('/api/tasks/:id/start', (req, res) => {
   child.on('exit', (code) => {
     console.log('[Task exit]', taskId, 'code:', code);
     runningTasks.delete(taskId);
+    stopLogWatching(taskId);
     broadcast('task:exit', { taskId, code });
 
     // Determine final status based on exit code
@@ -754,10 +1585,32 @@ app.post('/api/tasks/:id/stop', (req, res) => {
   if (task) {
     task.process.kill();
     runningTasks.delete(taskId);
+    stopLogWatching(taskId);
     // Broadcast status change when task is stopped
     broadcast('task:statusChange', { taskId, status: 'stopped' });
   }
 
+  res.json({ success: true });
+});
+
+// Log watching endpoints
+app.post('/api/tasks/:id/logs/watch', (req, res) => {
+  const { projectId } = req.body;
+  const taskId = req.params.id;
+  const store = loadStore();
+  const project = store.projects.find((p) => p.id === projectId);
+
+  if (!project) {
+    return res.status(404).json({ success: false, error: 'Project not found' });
+  }
+
+  startLogWatching(taskId, project.path);
+  res.json({ success: true });
+});
+
+app.post('/api/tasks/:id/logs/unwatch', (req, res) => {
+  const taskId = req.params.id;
+  stopLogWatching(taskId);
   res.json({ success: true });
 });
 
@@ -1872,17 +2725,82 @@ app.get('/api/tasks/:id/worktree/status', (req, res) => {
     return res.status(404).json({ success: false, error: 'Project not found' });
   }
 
+  const { execSync } = require('child_process');
   const worktreePath = path.join(project.path, '.worktrees', req.params.id);
-  const exists = existsSync(worktreePath);
 
-  res.json({
-    success: true,
-    data: {
-      exists,
-      path: exists ? worktreePath : null,
-      branch: exists ? `auto-claude/${req.params.id}` : null
+  if (!existsSync(worktreePath)) {
+    return res.json({ success: true, data: { exists: false } });
+  }
+
+  try {
+    // Get current branch in worktree
+    const branch = execSync('git rev-parse --abbrev-ref HEAD', {
+      cwd: worktreePath,
+      encoding: 'utf-8'
+    }).trim();
+
+    // Get base branch - the current branch in the main project
+    let baseBranch = 'main';
+    try {
+      baseBranch = execSync('git rev-parse --abbrev-ref HEAD', {
+        cwd: project.path,
+        encoding: 'utf-8'
+      }).trim();
+    } catch {
+      baseBranch = 'main';
     }
-  });
+
+    // Get commit count
+    let commitCount = 0;
+    try {
+      const countOutput = execSync(`git rev-list --count ${baseBranch}..HEAD 2>/dev/null || echo 0`, {
+        cwd: worktreePath,
+        encoding: 'utf-8'
+      }).trim();
+      commitCount = parseInt(countOutput, 10) || 0;
+    } catch {
+      commitCount = 0;
+    }
+
+    // Get diff stats
+    let filesChanged = 0;
+    let additions = 0;
+    let deletions = 0;
+
+    try {
+      const diffStat = execSync(`git diff --stat ${baseBranch}...HEAD 2>/dev/null || echo ""`, {
+        cwd: worktreePath,
+        encoding: 'utf-8'
+      }).trim();
+
+      // Parse the summary line (e.g., "3 files changed, 50 insertions(+), 10 deletions(-)")
+      const summaryMatch = diffStat.match(/(\d+) files? changed(?:, (\d+) insertions?\(\+\))?(?:, (\d+) deletions?\(-\))?/);
+      if (summaryMatch) {
+        filesChanged = parseInt(summaryMatch[1], 10) || 0;
+        additions = parseInt(summaryMatch[2], 10) || 0;
+        deletions = parseInt(summaryMatch[3], 10) || 0;
+      }
+    } catch {
+      // Ignore diff errors
+    }
+
+    res.json({
+      success: true,
+      data: {
+        exists: true,
+        worktreePath,
+        branch,
+        baseBranch,
+        commitCount,
+        filesChanged,
+        additions,
+        deletions
+      }
+    });
+  } catch (gitError) {
+    console.error('Git error getting worktree status:', gitError);
+    res.json({ success: true, data: { exists: true, worktreePath } });
+  }
 });
 
 app.get('/api/tasks/:id/worktree/diff', (req, res) => {
@@ -1894,25 +2812,105 @@ app.get('/api/tasks/:id/worktree/diff', (req, res) => {
     return res.status(404).json({ success: false, error: 'Project not found' });
   }
 
-  // Execute git diff in the worktree
+  const { execSync } = require('child_process');
   const worktreePath = path.join(project.path, '.worktrees', req.params.id);
+
   if (!existsSync(worktreePath)) {
-    return res.json({ success: true, data: { diff: '', files: [] } });
+    return res.json({ success: false, error: 'No worktree found for this task' });
   }
 
-  const { execSync } = require('child_process');
+  // Get base branch - the current branch in the main project
+  let baseBranch = 'main';
   try {
-    const diff = execSync('git diff HEAD~1..HEAD', { cwd: worktreePath, encoding: 'utf-8' });
-    const filesOutput = execSync('git diff --name-only HEAD~1..HEAD', { cwd: worktreePath, encoding: 'utf-8' });
-    const files = filesOutput.trim().split('\n').filter(Boolean);
-    res.json({ success: true, data: { diff, files } });
+    baseBranch = execSync('git rev-parse --abbrev-ref HEAD', {
+      cwd: project.path,
+      encoding: 'utf-8'
+    }).trim();
   } catch {
+    baseBranch = 'main';
+  }
+
+  try {
+    // Get list of changed files
+    const filesListOutput = execSync(`git diff --name-only ${baseBranch}...HEAD`, {
+      cwd: worktreePath,
+      encoding: 'utf-8'
+    }).trim();
+
+    const filesList = filesListOutput ? filesListOutput.split('\n') : [];
+
+    // Get diff with stats for each file
+    const diffOutput = execSync(`git diff --stat ${baseBranch}...HEAD`, {
+      cwd: worktreePath,
+      encoding: 'utf-8'
+    });
+
+    // Parse file stats from diff output
+    interface DiffFile {
+      path: string;
+      status: string;
+      additions: number;
+      deletions: number;
+    }
+    const files: DiffFile[] = [];
+
+    for (const filePath of filesList) {
+      if (!filePath) continue;
+
+      // Get file status (added, modified, deleted)
+      let status = 'modified';
+      try {
+        const statusOutput = execSync(`git diff --name-status ${baseBranch}...HEAD -- "${filePath}"`, {
+          cwd: worktreePath,
+          encoding: 'utf-8'
+        }).trim();
+        if (statusOutput.startsWith('A')) status = 'added';
+        else if (statusOutput.startsWith('D')) status = 'deleted';
+        else if (statusOutput.startsWith('R')) status = 'renamed';
+      } catch {}
+
+      // Get additions/deletions for this file
+      let additions = 0;
+      let deletions = 0;
+      try {
+        const numstatOutput = execSync(`git diff --numstat ${baseBranch}...HEAD -- "${filePath}"`, {
+          cwd: worktreePath,
+          encoding: 'utf-8'
+        }).trim();
+        const numstatMatch = numstatOutput.match(/^(\d+|-)\s+(\d+|-)/);
+        if (numstatMatch) {
+          additions = numstatMatch[1] === '-' ? 0 : parseInt(numstatMatch[1], 10);
+          deletions = numstatMatch[2] === '-' ? 0 : parseInt(numstatMatch[2], 10);
+        }
+      } catch {}
+
+      files.push({
+        path: filePath,
+        status,
+        additions,
+        deletions
+      });
+    }
+
+    res.json({
+      success: true,
+      data: {
+        diff: diffOutput,
+        files,
+        totalFiles: files.length,
+        totalAdditions: files.reduce((sum, f) => sum + f.additions, 0),
+        totalDeletions: files.reduce((sum, f) => sum + f.deletions, 0)
+      }
+    });
+  } catch (error) {
+    console.error('Failed to get worktree diff:', error);
     res.json({ success: true, data: { diff: '', files: [] } });
   }
 });
 
 app.post('/api/tasks/:id/worktree/merge', (req, res) => {
-  const { projectId } = req.body;
+  const { projectId, targetBranch } = req.body;
+  const taskId = req.params.id;
   const store = loadStore();
   const project = store.projects.find((p) => p.id === projectId);
 
@@ -1921,12 +2919,249 @@ app.post('/api/tasks/:id/worktree/merge', (req, res) => {
   }
 
   const { execSync } = require('child_process');
+  let hasStash = false; // Declare at top of handler scope to avoid ReferenceError in catch block
   try {
-    const branchName = `auto-claude/${req.params.id}`;
-    execSync(`git merge ${branchName}`, { cwd: project.path, encoding: 'utf-8' });
-    res.json({ success: true });
+    const branchName = `auto-claude/${taskId}`;
+
+    // Use targetBranch if provided, otherwise detect base branch (main or master)
+    let baseBranch = targetBranch;
+    if (!baseBranch) {
+      try {
+        execSync('git rev-parse --verify main', { cwd: project.path, encoding: 'utf-8', stdio: 'pipe' });
+        baseBranch = 'main';
+      } catch {
+        baseBranch = 'master';
+      }
+    }
+
+    // Checkout target branch if different from current
+    const currentBranch = execSync('git rev-parse --abbrev-ref HEAD', {
+      cwd: project.path,
+      encoding: 'utf-8'
+    }).trim();
+
+    if (currentBranch !== baseBranch) {
+      console.log(`[Merge] Checking out target branch: ${baseBranch}`);
+      execSync(`git checkout ${baseBranch}`, { cwd: project.path, encoding: 'utf-8', stdio: 'pipe' });
+    }
+
+    // Check if branch is already merged
+    let alreadyMerged = false;
+    try {
+      const unmergedCommits = execSync(`git log ${baseBranch}..${branchName} --oneline`, {
+        cwd: project.path,
+        encoding: 'utf-8',
+        stdio: 'pipe'
+      }).trim();
+      alreadyMerged = unmergedCommits === '';
+    } catch {
+      // Branch might not exist, continue with merge attempt
+    }
+
+    if (alreadyMerged) {
+      console.log(`[Merge] Branch ${branchName} already merged`);
+      // Update task status to done even if already merged
+      const planPath = path.join(project.path, '.auto-claude', 'specs', taskId, 'implementation_plan.json');
+      if (existsSync(planPath)) {
+        try {
+          const plan = JSON.parse(readFileSync(planPath, 'utf-8'));
+          plan.status = 'done';
+          plan.merged_at = plan.merged_at || new Date().toISOString();
+          writeFileSync(planPath, JSON.stringify(plan, null, 2));
+        } catch {}
+      }
+      return res.json({
+        success: true,
+        data: {
+          success: true,
+          message: 'Branch already merged'
+        }
+      });
+    }
+
+    // Abort any ongoing merge first
+    try {
+      execSync('git merge --abort', { cwd: project.path, encoding: 'utf-8', stdio: 'pipe' });
+      console.log('[Merge] Aborted previous merge');
+    } catch {
+      // No merge in progress, continue
+    }
+
+    // Check for uncommitted changes and stash them (excluding worktrees)
+    try {
+      // Exclude .worktrees from status check - they're git worktrees, not regular files
+      const status = execSync('git status --porcelain -- . ":(exclude).worktrees"', { cwd: project.path, encoding: 'utf-8' });
+      const hasChanges = status.trim().length > 0;
+      if (hasChanges) {
+        console.log('[Merge] Stashing uncommitted changes');
+        execSync('git stash push -m "Pre-merge stash" -- . ":(exclude).worktrees"', { cwd: project.path, encoding: 'utf-8', stdio: 'pipe' });
+        hasStash = true;
+      }
+    } catch (e) {
+      console.log('[Merge] Stash failed, continuing:', e);
+    }
+
+    // Ensure .worktrees is in .gitignore to prevent future issues
+    const gitignorePath = path.join(project.path, '.gitignore');
+    try {
+      const gitignore = existsSync(gitignorePath) ? readFileSync(gitignorePath, 'utf-8') : '';
+      if (!gitignore.includes('.worktrees')) {
+        writeFileSync(gitignorePath, gitignore + '\n.worktrees/\n');
+        console.log('[Merge] Added .worktrees to .gitignore');
+      }
+    } catch {}
+
+    // Clean up untracked files that might conflict
+    const filesToClean = ['.claude_settings.json', '.auto-claude-status'];
+    for (const file of filesToClean) {
+      const filePath = path.join(project.path, file);
+      if (existsSync(filePath)) {
+        try {
+          unlinkSync(filePath);
+          console.log(`[Merge] Cleaned up ${file}`);
+        } catch {}
+      }
+    }
+
+    // Remove local spec dir if it exists and is untracked (will be replaced by merge)
+    const localSpecDir = path.join(project.path, '.auto-claude', 'specs', taskId);
+    try {
+      const isTracked = execSync(`git ls-files --error-unmatch "${localSpecDir}" 2>/dev/null || echo "untracked"`,
+        { cwd: project.path, encoding: 'utf-8' }).trim();
+      if (isTracked === 'untracked' && existsSync(localSpecDir)) {
+        console.log('[Merge] Removing untracked local spec dir:', localSpecDir);
+        const { rmSync } = require('fs');
+        rmSync(localSpecDir, { recursive: true, force: true });
+      }
+    } catch {}
+
+    // Perform the merge
+    try {
+      execSync(`git merge ${branchName} --no-edit`, { cwd: project.path, encoding: 'utf-8' });
+    } catch (mergeError) {
+      // Check if it's a conflict on status files that we can auto-resolve
+      const status = execSync('git status --porcelain', { cwd: project.path, encoding: 'utf-8' });
+      const mergeErrorMessage = mergeError instanceof Error ? mergeError.message : String(mergeError);
+
+      // Match different conflict types: UU (both modified), DU (deleted by us), UD (deleted by them)
+      const conflictLines = status.split('\n').filter(line => /^(UU|DU|UD|AA) /.test(line));
+      const conflictFiles = conflictLines.map(line => line.slice(3).trim());
+
+      // Check for submodule conflicts
+      const hasSubmoduleConflict = mergeErrorMessage.includes('submodule') || mergeErrorMessage.includes('CONFLICT (submodule)');
+
+      const autoResolvableFiles = ['.auto-claude-status', '.claude_settings.json'];
+      // Also auto-resolve submodule conflicts by accepting the current (main branch) version
+      const canAutoResolve = conflictFiles.length > 0 && conflictFiles.every(f => autoResolvableFiles.includes(f));
+
+      if (canAutoResolve || hasSubmoduleConflict) {
+        console.log('[Merge] Auto-resolving conflicts on:', conflictFiles);
+
+        // First resolve regular file conflicts
+        for (const line of conflictLines) {
+          const conflictType = line.slice(0, 2);
+          const file = line.slice(3).trim();
+          try {
+            if (conflictType === 'DU') {
+              // Deleted in HEAD, modified in theirs - remove the file
+              execSync(`git rm "${file}"`, { cwd: project.path, encoding: 'utf-8', stdio: 'pipe' });
+            } else if (conflictType === 'UD') {
+              // Modified in HEAD, deleted in theirs - keep deleted
+              execSync(`git rm "${file}"`, { cwd: project.path, encoding: 'utf-8', stdio: 'pipe' });
+            } else {
+              // UU or AA - accept theirs
+              execSync(`git checkout --theirs "${file}"`, { cwd: project.path, encoding: 'utf-8', stdio: 'pipe' });
+              execSync(`git add "${file}"`, { cwd: project.path, encoding: 'utf-8', stdio: 'pipe' });
+            }
+          } catch {}
+        }
+
+        // Handle submodule conflicts - keep HEAD version (main branch's submodule state)
+        if (hasSubmoduleConflict) {
+          console.log('[Merge] Resolving submodule conflicts by keeping current version');
+          try {
+            // Get list of submodules and reset them to HEAD
+            const submodules = execSync('git config --file .gitmodules --get-regexp path | cut -d" " -f2', {
+              cwd: project.path, encoding: 'utf-8', stdio: 'pipe'
+            }).trim().split('\n').filter(Boolean);
+
+            for (const submodule of submodules) {
+              try {
+                // Checkout the HEAD version of the submodule reference
+                execSync(`git checkout HEAD -- "${submodule}"`, { cwd: project.path, encoding: 'utf-8', stdio: 'pipe' });
+                execSync(`git add "${submodule}"`, { cwd: project.path, encoding: 'utf-8', stdio: 'pipe' });
+              } catch {}
+            }
+          } catch {
+            // If submodule handling fails, just try to add all and continue
+            try {
+              execSync('git add -A', { cwd: project.path, encoding: 'utf-8', stdio: 'pipe' });
+            } catch {}
+          }
+        }
+
+        try {
+          execSync(`git commit -m "Merge ${branchName}"`, { cwd: project.path, encoding: 'utf-8' });
+        } catch {
+          // If commit fails, there may still be conflicts - continue without commit
+          console.log('[Merge] Auto-commit failed, attempting to continue');
+        }
+      } else if (conflictFiles.length === 0) {
+        // No conflicts but merge failed - might be an untracked file issue, try to continue
+        try {
+          execSync('git merge --continue', { cwd: project.path, encoding: 'utf-8', stdio: 'pipe' });
+        } catch {
+          throw mergeError;
+        }
+      } else {
+        throw mergeError;
+      }
+    }
+
+    // Pop stash if we created one
+    if (hasStash) {
+      try {
+        console.log('[Merge] Restoring stashed changes');
+        execSync('git stash pop', { cwd: project.path, encoding: 'utf-8', stdio: 'pipe' });
+      } catch (e) {
+        console.log('[Merge] Stash pop failed (may have conflicts):', e);
+        // Try to drop the stash if pop failed - changes might already be in merge
+        try {
+          execSync('git stash drop', { cwd: project.path, encoding: 'utf-8', stdio: 'pipe' });
+        } catch {}
+      }
+    }
+
+    // Update task status to done
+    const planPath = path.join(project.path, '.auto-claude', 'specs', taskId, 'implementation_plan.json');
+    if (existsSync(planPath)) {
+      try {
+        const plan = JSON.parse(readFileSync(planPath, 'utf-8'));
+        plan.status = 'done';
+        plan.merged_at = new Date().toISOString();
+        writeFileSync(planPath, JSON.stringify(plan, null, 2));
+      } catch {}
+    }
+
+    res.json({
+      success: true,
+      data: {
+        success: true,
+        message: 'Merge completed successfully'
+      }
+    });
   } catch (error) {
-    res.json({ success: false, error: String(error) });
+    console.error('[Merge] Error:', error);
+    // Restore stash even on error
+    if (hasStash) {
+      try {
+        execSync('git stash pop', { cwd: project.path, encoding: 'utf-8', stdio: 'pipe' });
+      } catch {}
+    }
+    res.json({
+      success: false,
+      error: error instanceof Error ? error.message : String(error)
+    });
   }
 });
 
@@ -1957,6 +3192,7 @@ app.post('/api/tasks/:id/worktree/discard', (req, res) => {
 
 app.get('/api/tasks/:id/worktree/merge-preview', (req, res) => {
   const { projectId } = req.query;
+  const taskId = req.params.id;
   const store = loadStore();
   const project = store.projects.find((p) => p.id === projectId);
 
@@ -1966,11 +3202,78 @@ app.get('/api/tasks/:id/worktree/merge-preview', (req, res) => {
 
   const { execSync } = require('child_process');
   try {
-    const branchName = `auto-claude/${req.params.id}`;
-    const commits = execSync(`git log main..${branchName} --oneline`, { cwd: project.path, encoding: 'utf-8' });
-    res.json({ success: true, data: { commits: commits.trim().split('\n').filter(Boolean) } });
-  } catch {
-    res.json({ success: true, data: { commits: [] } });
+    const branchName = `auto-claude/${taskId}`;
+    const worktreePath = path.join(project.path, '.worktrees', taskId);
+
+    // Detect base branch (main or master)
+    let baseBranch = 'main';
+    try {
+      execSync('git rev-parse --verify main', { cwd: project.path, encoding: 'utf-8', stdio: 'pipe' });
+    } catch {
+      baseBranch = 'master';
+    }
+
+    // Get commits
+    let commits: string[] = [];
+    try {
+      const commitOutput = execSync(`git log ${baseBranch}..${branchName} --oneline`, { cwd: project.path, encoding: 'utf-8' });
+      commits = commitOutput.trim().split('\n').filter(Boolean);
+    } catch {
+      // Branch might not exist yet
+    }
+
+    // Get changed files
+    let files: string[] = [];
+    try {
+      const diffOutput = execSync(`git diff --name-only ${baseBranch}..${branchName}`, { cwd: project.path, encoding: 'utf-8' });
+      files = diffOutput.trim().split('\n').filter(Boolean);
+    } catch {
+      // Try getting files from worktree
+      try {
+        const statusOutput = execSync('git diff --name-only HEAD', { cwd: worktreePath, encoding: 'utf-8' });
+        files = statusOutput.trim().split('\n').filter(Boolean);
+      } catch {}
+    }
+
+    // Return proper preview format
+    res.json({
+      success: true,
+      data: {
+        success: true,
+        message: `${commits.length} commits, ${files.length} files to merge`,
+        preview: {
+          files: files,
+          conflicts: [], // No conflict detection in web mode - just merge directly
+          summary: {
+            totalFiles: files.length,
+            conflictFiles: 0,
+            totalConflicts: 0,
+            autoMergeable: 0
+          }
+        },
+        commits: commits
+      }
+    });
+  } catch (error) {
+    console.error('[Merge Preview] Error:', error);
+    res.json({
+      success: true,
+      data: {
+        success: true,
+        message: 'Ready to merge',
+        preview: {
+          files: [],
+          conflicts: [],
+          summary: {
+            totalFiles: 0,
+            conflictFiles: 0,
+            totalConflicts: 0,
+            autoMergeable: 0
+          }
+        },
+        commits: []
+      }
+    });
   }
 });
 
@@ -1999,14 +3302,12 @@ app.get('/api/context', (req, res) => {
     } catch {}
   }
 
-  // Check memory status
-  const hasMemory = existsSync(memoryDir);
-  let memoryStatus = { enabled: hasMemory, backend: 'file' };
+  // Use the global FalkorDB status for memory status
   let memoryState = null;
-  let recentMemories: unknown[] = [];
 
+  // Try to load memory state from file (fallback)
+  const hasMemory = existsSync(memoryDir);
   if (hasMemory) {
-    // Try to load memory state
     const stateFile = path.join(memoryDir, 'state.json');
     if (existsSync(stateFile)) {
       try {
@@ -2015,11 +3316,14 @@ app.get('/api/context', (req, res) => {
     }
   }
 
+  // Load recent memories from specs (same logic as /api/context/memories)
+  const recentMemories = loadFileBasedMemories(project.path, 5);
+
   res.json({
     success: true,
     data: {
       projectIndex,
-      memoryStatus,
+      memoryStatus: falkordbStatus, // Use real FalkorDB status
       memoryState,
       recentMemories
     }
@@ -2035,16 +3339,10 @@ app.get('/api/context/memory-status', (req, res) => {
     return res.status(404).json({ success: false, error: 'Project not found' });
   }
 
-  const memoryDir = path.join(project.path, '.auto-claude', 'memory');
-  const hasMemory = existsSync(memoryDir);
-
+  // Return the live FalkorDB status from the global state
   res.json({
     success: true,
-    data: {
-      backend: 'file',
-      enabled: hasMemory,
-      path: memoryDir
-    }
+    data: falkordbStatus
   });
 });
 
@@ -2073,7 +3371,7 @@ app.post('/api/context/refresh', (req, res) => {
 });
 
 // Search memories
-app.get('/api/context/memories/search', (req, res) => {
+app.get('/api/context/memories/search', async (req, res) => {
   const { projectId, q } = req.query;
   const store = loadStore();
   const project = store.projects.find((p) => p.id === projectId);
@@ -2082,64 +3380,100 @@ app.get('/api/context/memories/search', (req, res) => {
     return res.status(404).json({ success: false, error: 'Project not found' });
   }
 
-  const memoryDir = path.join(project.path, '.auto-claude', 'memory');
-  if (!existsSync(memoryDir)) {
+  const queryStr = String(q || '');
+  if (!queryStr.trim()) {
     return res.json({ success: true, data: [] });
   }
 
-  // Simple file-based search
-  const results: unknown[] = [];
-  try {
-    const files = readdirSync(memoryDir).filter(f => f.endsWith('.json'));
-    const query = String(q || '').toLowerCase();
-    for (const f of files) {
-      try {
-        const content = readFileSync(path.join(memoryDir, f), 'utf-8');
-        if (content.toLowerCase().includes(query)) {
-          results.push(JSON.parse(content));
-        }
-      } catch {
-        // Ignore
+  // Try FalkorDB first if available
+  if (falkordbStatus.available) {
+    try {
+      const falkorResults = await searchFalkorDBMemories(queryStr, 20);
+      if (falkorResults.length > 0) {
+        return res.json({
+          success: true,
+          data: falkorResults.map(r => ({
+            content: r.content,
+            score: r.score || 1.0,
+            type: r.type
+          }))
+        });
       }
+    } catch (err) {
+      console.warn('FalkorDB search failed, falling back to file-based:', err);
     }
-  } catch {
-    // Ignore
   }
 
-  res.json({ success: true, data: results });
+  // Fall back to file-based search in specs directories
+  const specsDir = path.join(project.path, '.auto-claude', 'specs');
+  const results: Array<{ content: string; score: number; type: string }> = [];
+  const queryLower = queryStr.toLowerCase();
+
+  if (existsSync(specsDir)) {
+    try {
+      const specDirs = readdirSync(specsDir)
+        .filter(f => statSync(path.join(specsDir, f)).isDirectory());
+
+      for (const specDir of specDirs) {
+        const memoryDir = path.join(specsDir, specDir, 'memory');
+        if (!existsSync(memoryDir)) continue;
+
+        const memoryFiles = readdirSync(memoryDir).filter(f => f.endsWith('.json'));
+        for (const memFile of memoryFiles) {
+          try {
+            const memPath = path.join(memoryDir, memFile);
+            const memContent = readFileSync(memPath, 'utf-8');
+            if (memContent.toLowerCase().includes(queryLower)) {
+              const memData = JSON.parse(memContent);
+              results.push({
+                content: JSON.stringify(memData.insights || memData, null, 2),
+                score: 1.0,
+                type: 'session_insight'
+              });
+            }
+          } catch { /* skip */ }
+        }
+      }
+    } catch { /* skip */ }
+  }
+
+  res.json({ success: true, data: results.slice(0, 20) });
 });
 
 // Get recent memories
-app.get('/api/context/memories', (req, res) => {
+app.get('/api/context/memories', async (req, res) => {
   const { projectId, limit } = req.query;
   const store = loadStore();
   const project = store.projects.find((p) => p.id === projectId);
+
+  console.log(`[Memory API] GET /memories - projectId: ${projectId}, limit: ${limit}`);
 
   if (!project) {
     return res.status(404).json({ success: false, error: 'Project not found' });
   }
 
-  const memoryDir = path.join(project.path, '.auto-claude', 'memory');
-  if (!existsSync(memoryDir)) {
-    return res.json({ success: true, data: [] });
-  }
+  const memLimit = Number(limit) || 20;
 
-  const memories: unknown[] = [];
-  try {
-    const files = readdirSync(memoryDir)
-      .filter(f => f.endsWith('.json'))
-      .slice(0, Number(limit) || 10);
-    for (const f of files) {
-      try {
-        memories.push(JSON.parse(readFileSync(path.join(memoryDir, f), 'utf-8')));
-      } catch {
-        // Ignore
+  // Try FalkorDB first if available
+  if (falkordbStatus.available) {
+    console.log('[Memory API] Trying FalkorDB...');
+    try {
+      const falkorMemories = await getFalkorDBMemories(memLimit);
+      console.log(`[Memory API] FalkorDB returned ${falkorMemories.length} memories`);
+      if (falkorMemories.length > 0) {
+        return res.json({ success: true, data: falkorMemories });
       }
+    } catch (err) {
+      console.warn('[Memory API] FalkorDB query failed, falling back to file-based:', err);
     }
-  } catch {
-    // Ignore
+  } else {
+    console.log('[Memory API] FalkorDB not available, using file-based');
   }
 
+  // Fall back to file-based memories from specs
+  console.log(`[Memory API] Loading file-based memories from: ${project.path}`);
+  const memories = loadFileBasedMemories(project.path, memLimit);
+  console.log(`[Memory API] File-based returned ${memories.length} memories`);
   res.json({ success: true, data: memories });
 });
 
@@ -2295,6 +3629,360 @@ app.post('/api/ideation/stop', (req, res) => {
     res.json({ success: true });
   } else {
     res.json({ success: false, error: 'No ideation process running' });
+  }
+});
+
+// Convert idea to task
+app.post('/api/ideation/ideas/:id/convert', (req, res) => {
+  const ideaId = req.params.id;
+  const { projectId } = req.query;
+  const store = loadStore();
+  const project = store.projects.find((p) => p.id === projectId);
+
+  if (!project) {
+    return res.status(404).json({ success: false, error: 'Project not found' });
+  }
+
+  const ideationPath = path.join(project.path, '.auto-claude', 'ideation', 'ideation.json');
+  if (!existsSync(ideationPath)) {
+    return res.status(404).json({ success: false, error: 'Ideation not found' });
+  }
+
+  try {
+    const ideation = JSON.parse(readFileSync(ideationPath, 'utf-8'));
+    const idea = ideation.ideas?.find((i: { id: string }) => i.id === ideaId);
+
+    if (!idea) {
+      return res.status(404).json({ success: false, error: 'Idea not found' });
+    }
+
+    // Get specs directory
+    const specsDir = path.join(project.path, '.auto-claude', 'specs');
+    if (!existsSync(specsDir)) {
+      mkdirSync(specsDir, { recursive: true });
+    }
+
+    // Find next spec number
+    let nextNum = 1;
+    try {
+      const existingSpecs = readdirSync(specsDir, { withFileTypes: true })
+        .filter(d => d.isDirectory())
+        .map(d => {
+          const match = d.name.match(/^(\d+)-/);
+          return match ? parseInt(match[1], 10) : 0;
+        })
+        .filter(n => n > 0);
+      if (existingSpecs.length > 0) {
+        nextNum = Math.max(...existingSpecs) + 1;
+      }
+    } catch {}
+
+    // Create spec ID
+    const slug = idea.title
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-|-$/g, '')
+      .substring(0, 50);
+    const specId = `${String(nextNum).padStart(3, '0')}-${slug}`;
+    const specDir = path.join(specsDir, specId);
+
+    // Create spec directory
+    mkdirSync(specDir, { recursive: true });
+
+    // Build task description
+    let description = `# ${idea.title}\n\n${idea.description}\n\n## Rationale\n${idea.rationale}\n\n`;
+    if (idea.implementation_approach) {
+      description += `## Implementation Approach\n${idea.implementation_approach}\n\n`;
+    }
+    if (idea.affected_files?.length) {
+      description += `## Affected Files\n${idea.affected_files.map((f: string) => `- ${f}`).join('\n')}\n\n`;
+    }
+
+    // Map idea type to category
+    const categoryMap: Record<string, string> = {
+      'code_improvements': 'feature',
+      'ui_ux_improvements': 'ui_ux',
+      'documentation_gaps': 'documentation',
+      'security_hardening': 'security',
+      'performance_optimizations': 'performance',
+      'code_quality': 'refactoring'
+    };
+
+    // Create implementation_plan.json
+    const plan = {
+      feature: idea.title,
+      description: idea.description,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      status: 'backlog',
+      planStatus: 'pending',
+      phases: [],
+      workflow_type: 'development',
+      services_involved: [],
+      final_acceptance: [],
+      spec_file: 'spec.md'
+    };
+    writeFileSync(path.join(specDir, 'implementation_plan.json'), JSON.stringify(plan, null, 2));
+
+    // Create spec.md
+    const specContent = `# ${idea.title}
+
+## Overview
+
+${idea.description}
+
+## Rationale
+
+${idea.rationale}
+
+---
+*This spec was created from ideation and is pending detailed specification.*
+`;
+    writeFileSync(path.join(specDir, 'spec.md'), specContent);
+
+    // Create metadata
+    const metadata = {
+      sourceType: 'ideation',
+      ideationType: idea.type,
+      ideaId: idea.id,
+      rationale: idea.rationale,
+      category: categoryMap[idea.type] || 'feature',
+      affectedFiles: idea.affected_files || idea.affected_components || []
+    };
+    writeFileSync(path.join(specDir, 'task_metadata.json'), JSON.stringify(metadata, null, 2));
+
+    // Update idea status to archived
+    idea.status = 'archived';
+    idea.linked_task_id = specId;
+    ideation.updated_at = new Date().toISOString();
+    writeFileSync(ideationPath, JSON.stringify(ideation, null, 2));
+
+    // Build task response
+    const task = {
+      id: specId,
+      specId: specId,
+      projectId,
+      title: idea.title,
+      description: description,
+      status: 'backlog',
+      subtasks: [],
+      logs: [],
+      metadata,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+
+    res.json({ success: true, data: task });
+  } catch (error) {
+    console.error('[Ideation Convert] Error:', error);
+    res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : 'Failed to convert idea to task'
+    });
+  }
+});
+
+// Update idea status
+app.patch('/api/ideation/ideas/:id', (req, res) => {
+  const ideaId = req.params.id;
+  const { projectId } = req.query;
+  const { status } = req.body;
+
+  const store = loadStore();
+  const project = store.projects.find((p) => p.id === projectId);
+
+  if (!project) {
+    return res.status(404).json({ success: false, error: 'Project not found' });
+  }
+
+  const ideationPath = path.join(project.path, '.auto-claude', 'ideation', 'ideation.json');
+  if (!existsSync(ideationPath)) {
+    return res.status(404).json({ success: false, error: 'Ideation not found' });
+  }
+
+  try {
+    const ideation = JSON.parse(readFileSync(ideationPath, 'utf-8'));
+    const idea = ideation.ideas?.find((i: { id: string }) => i.id === ideaId);
+
+    if (!idea) {
+      return res.status(404).json({ success: false, error: 'Idea not found' });
+    }
+
+    idea.status = status;
+    ideation.updated_at = new Date().toISOString();
+    writeFileSync(ideationPath, JSON.stringify(ideation, null, 2));
+
+    res.json({ success: true, data: idea });
+  } catch (error) {
+    res.status(500).json({ success: false, error: 'Failed to update idea' });
+  }
+});
+
+// Dismiss idea
+app.post('/api/ideation/ideas/:id/dismiss', (req, res) => {
+  const ideaId = req.params.id;
+  const { projectId } = req.query;
+
+  const store = loadStore();
+  const project = store.projects.find((p) => p.id === projectId);
+
+  if (!project) {
+    return res.status(404).json({ success: false, error: 'Project not found' });
+  }
+
+  const ideationPath = path.join(project.path, '.auto-claude', 'ideation', 'ideation.json');
+  if (!existsSync(ideationPath)) {
+    return res.status(404).json({ success: false, error: 'Ideation not found' });
+  }
+
+  try {
+    const ideation = JSON.parse(readFileSync(ideationPath, 'utf-8'));
+    const idea = ideation.ideas?.find((i: { id: string }) => i.id === ideaId);
+
+    if (!idea) {
+      return res.status(404).json({ success: false, error: 'Idea not found' });
+    }
+
+    idea.status = 'dismissed';
+    ideation.updated_at = new Date().toISOString();
+    writeFileSync(ideationPath, JSON.stringify(ideation, null, 2));
+
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ success: false, error: 'Failed to dismiss idea' });
+  }
+});
+
+// Archive idea
+app.post('/api/ideation/ideas/:id/archive', (req, res) => {
+  const ideaId = req.params.id;
+  const { projectId } = req.query;
+
+  const store = loadStore();
+  const project = store.projects.find((p) => p.id === projectId);
+
+  if (!project) {
+    return res.status(404).json({ success: false, error: 'Project not found' });
+  }
+
+  const ideationPath = path.join(project.path, '.auto-claude', 'ideation', 'ideation.json');
+  if (!existsSync(ideationPath)) {
+    return res.status(404).json({ success: false, error: 'Ideation not found' });
+  }
+
+  try {
+    const ideation = JSON.parse(readFileSync(ideationPath, 'utf-8'));
+    const idea = ideation.ideas?.find((i: { id: string }) => i.id === ideaId);
+
+    if (!idea) {
+      return res.status(404).json({ success: false, error: 'Idea not found' });
+    }
+
+    idea.status = 'archived';
+    ideation.updated_at = new Date().toISOString();
+    writeFileSync(ideationPath, JSON.stringify(ideation, null, 2));
+
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ success: false, error: 'Failed to archive idea' });
+  }
+});
+
+// Delete idea
+app.delete('/api/ideation/ideas/:id', (req, res) => {
+  const ideaId = req.params.id;
+  const { projectId } = req.query;
+
+  const store = loadStore();
+  const project = store.projects.find((p) => p.id === projectId);
+
+  if (!project) {
+    return res.status(404).json({ success: false, error: 'Project not found' });
+  }
+
+  const ideationPath = path.join(project.path, '.auto-claude', 'ideation', 'ideation.json');
+  if (!existsSync(ideationPath)) {
+    return res.status(404).json({ success: false, error: 'Ideation not found' });
+  }
+
+  try {
+    const ideation = JSON.parse(readFileSync(ideationPath, 'utf-8'));
+    const ideaIndex = ideation.ideas?.findIndex((i: { id: string }) => i.id === ideaId);
+
+    if (ideaIndex === -1 || ideaIndex === undefined) {
+      return res.status(404).json({ success: false, error: 'Idea not found' });
+    }
+
+    ideation.ideas.splice(ideaIndex, 1);
+    ideation.updated_at = new Date().toISOString();
+    writeFileSync(ideationPath, JSON.stringify(ideation, null, 2));
+
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ success: false, error: 'Failed to delete idea' });
+  }
+});
+
+// Dismiss all ideas
+app.post('/api/ideation/dismiss-all', (req, res) => {
+  const { projectId } = req.query;
+
+  const store = loadStore();
+  const project = store.projects.find((p) => p.id === projectId);
+
+  if (!project) {
+    return res.status(404).json({ success: false, error: 'Project not found' });
+  }
+
+  const ideationPath = path.join(project.path, '.auto-claude', 'ideation', 'ideation.json');
+  if (!existsSync(ideationPath)) {
+    return res.status(404).json({ success: false, error: 'Ideation not found' });
+  }
+
+  try {
+    const ideation = JSON.parse(readFileSync(ideationPath, 'utf-8'));
+    if (ideation.ideas) {
+      ideation.ideas.forEach((idea: { status: string }) => {
+        idea.status = 'dismissed';
+      });
+    }
+    ideation.updated_at = new Date().toISOString();
+    writeFileSync(ideationPath, JSON.stringify(ideation, null, 2));
+
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ success: false, error: 'Failed to dismiss all ideas' });
+  }
+});
+
+// Delete multiple ideas
+app.post('/api/ideation/delete-multiple', (req, res) => {
+  const { projectId } = req.query;
+  const { ideaIds } = req.body;
+
+  const store = loadStore();
+  const project = store.projects.find((p) => p.id === projectId);
+
+  if (!project) {
+    return res.status(404).json({ success: false, error: 'Project not found' });
+  }
+
+  const ideationPath = path.join(project.path, '.auto-claude', 'ideation', 'ideation.json');
+  if (!existsSync(ideationPath)) {
+    return res.status(404).json({ success: false, error: 'Ideation not found' });
+  }
+
+  try {
+    const ideation = JSON.parse(readFileSync(ideationPath, 'utf-8'));
+    if (ideation.ideas) {
+      ideation.ideas = ideation.ideas.filter((i: { id: string }) => !ideaIds.includes(i.id));
+    }
+    ideation.updated_at = new Date().toISOString();
+    writeFileSync(ideationPath, JSON.stringify(ideation, null, 2));
+
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ success: false, error: 'Failed to delete ideas' });
   }
 });
 
@@ -2508,6 +4196,7 @@ app.patch('/api/insights/sessions/:sessionId', (req, res) => {
 
 // ============ Changelog ============
 
+// Support both GET (discovery) and POST (with tasks filter)
 app.get('/api/changelog/done-tasks', (req, res) => {
   const { projectId } = req.query;
   const store = loadStore();
@@ -2517,6 +4206,55 @@ app.get('/api/changelog/done-tasks', (req, res) => {
     return res.status(404).json({ success: false, error: 'Project not found' });
   }
 
+  const specsDir = path.join(project.path, '.auto-claude', 'specs');
+  const doneTasks: unknown[] = [];
+
+  if (existsSync(specsDir)) {
+    const specDirs = readdirSync(specsDir, { withFileTypes: true })
+      .filter((d) => d.isDirectory())
+      .map((d) => d.name);
+
+    for (const specName of specDirs) {
+      const planPath = path.join(specsDir, specName, 'implementation_plan.json');
+      if (existsSync(planPath)) {
+        try {
+          const plan = JSON.parse(readFileSync(planPath, 'utf-8'));
+          if (plan.status === 'done' || plan.status === 'completed') {
+            doneTasks.push({ id: specName, title: plan.title || specName });
+          }
+        } catch {
+          // Ignore
+        }
+      }
+    }
+  }
+
+  res.json({ success: true, data: doneTasks });
+});
+
+app.post('/api/changelog/done-tasks', (req, res) => {
+  const { projectId } = req.query;
+  const { tasks } = req.body;
+  const store = loadStore();
+  const project = store.projects.find((p) => p.id === projectId);
+
+  if (!project) {
+    return res.status(404).json({ success: false, error: 'Project not found' });
+  }
+
+  // If tasks provided in body, use those (frontend is sending filtered tasks)
+  if (tasks && Array.isArray(tasks)) {
+    // Filter to only include done tasks and format them
+    const doneTasks = tasks.filter((t: { status?: string }) =>
+      t.status === 'done' || t.status === 'completed' || t.status === 'human_review'
+    ).map((t: { id?: string; title?: string; spec_id?: string }) => ({
+      id: t.id || t.spec_id,
+      title: t.title || t.id || t.spec_id
+    }));
+    return res.json({ success: true, data: doneTasks });
+  }
+
+  // Otherwise, discover from filesystem
   const specsDir = path.join(project.path, '.auto-claude', 'specs');
   const doneTasks: unknown[] = [];
 
@@ -2681,18 +4419,65 @@ app.get('/api/tasks/:id/logs', (req, res) => {
     return res.status(404).json({ success: false, error: 'Project not found' });
   }
 
-  const logsPath = path.join(project.path, '.auto-claude', 'specs', req.params.id, 'logs');
-  const logs: string[] = [];
+  const specId = req.params.id;
+  const specDir = path.join(project.path, '.auto-claude', 'specs', specId);
+  const worktreeSpecDir = path.join(project.path, '.worktrees', specId, '.auto-claude', 'specs', specId);
 
-  if (existsSync(logsPath)) {
-    const logFiles = readdirSync(logsPath).filter((f) => f.endsWith('.log'));
-    for (const logFile of logFiles) {
-      const content = readFileSync(path.join(logsPath, logFile), 'utf-8');
-      logs.push(content);
+  // Try to load structured task_logs.json (like Electron does)
+  const loadTaskLogs = (dir: string) => {
+    const logFile = path.join(dir, 'task_logs.json');
+    if (existsSync(logFile)) {
+      try {
+        return JSON.parse(readFileSync(logFile, 'utf-8'));
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  };
+
+  const mainLogs = loadTaskLogs(specDir);
+  const worktreeLogs = loadTaskLogs(worktreeSpecDir);
+
+  // Merge logs from both locations (worktree takes precedence for coding/validation)
+  let taskLogs = mainLogs;
+  if (worktreeLogs) {
+    if (!mainLogs) {
+      taskLogs = worktreeLogs;
+    } else {
+      // Merge: planning from main, coding/validation from worktree if available
+      taskLogs = {
+        spec_id: mainLogs.spec_id,
+        created_at: mainLogs.created_at,
+        updated_at: worktreeLogs.updated_at > mainLogs.updated_at ? worktreeLogs.updated_at : mainLogs.updated_at,
+        phases: {
+          planning: mainLogs.phases?.planning || worktreeLogs.phases?.planning,
+          coding: (worktreeLogs.phases?.coding?.entries?.length > 0 || worktreeLogs.phases?.coding?.status !== 'pending')
+            ? worktreeLogs.phases.coding
+            : mainLogs.phases?.coding,
+          validation: (worktreeLogs.phases?.validation?.entries?.length > 0 || worktreeLogs.phases?.validation?.status !== 'pending')
+            ? worktreeLogs.phases.validation
+            : mainLogs.phases?.validation
+        }
+      };
     }
   }
 
-  res.json({ success: true, data: logs.join('\n') });
+  // Also load legacy .log files if no structured logs
+  if (!taskLogs) {
+    const logsPath = path.join(specDir, 'logs');
+    const logs: string[] = [];
+    if (existsSync(logsPath)) {
+      const logFiles = readdirSync(logsPath).filter((f) => f.endsWith('.log'));
+      for (const logFile of logFiles) {
+        const content = readFileSync(path.join(logsPath, logFile), 'utf-8');
+        logs.push(content);
+      }
+    }
+    return res.json({ success: true, data: { raw: logs.join('\n') } });
+  }
+
+  res.json({ success: true, data: taskLogs });
 });
 
 // ============ Settings ============
@@ -3043,6 +4828,425 @@ app.post('/api/changelog/load-specs', (req, res) => {
   res.json({ success: true, data: specs });
 });
 
+// Changelog Git Operations
+app.get('/api/changelog/branches', (req, res) => {
+  const { projectId } = req.query;
+  const store = loadStore();
+  const project = store.projects.find((p) => p.id === projectId);
+
+  if (!project) {
+    return res.status(404).json({ success: false, error: 'Project not found' });
+  }
+
+  const { execSync } = require('child_process');
+  try {
+    // Get current branch
+    let currentBranch = '';
+    try {
+      currentBranch = execSync('git rev-parse --abbrev-ref HEAD', {
+        cwd: project.path,
+        encoding: 'utf-8'
+      }).trim();
+    } catch {}
+
+    // Get all branches
+    const output = execSync('git branch -a --format="%(refname:short)|%(HEAD)"', {
+      cwd: project.path,
+      encoding: 'utf-8'
+    });
+
+    const branches: { name: string; isRemote: boolean; isCurrent: boolean }[] = [];
+    const seenNames = new Set<string>();
+
+    for (const line of output.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      const [name, head] = trimmed.split('|');
+      if (!name || name === 'HEAD' || name.includes('HEAD')) continue;
+
+      const isRemote = name.startsWith('origin/') || name.startsWith('remotes/');
+      const displayName = isRemote ? name.replace(/^origin\//, '') : name;
+      if (seenNames.has(displayName) && isRemote) continue;
+      seenNames.add(displayName);
+
+      branches.push({
+        name: displayName,
+        isRemote,
+        isCurrent: head === '*' || displayName === currentBranch
+      });
+    }
+
+    // Sort: current first, then local, then remote
+    branches.sort((a, b) => {
+      if (a.isCurrent && !b.isCurrent) return -1;
+      if (!a.isCurrent && b.isCurrent) return 1;
+      if (!a.isRemote && b.isRemote) return -1;
+      if (a.isRemote && !b.isRemote) return 1;
+      return a.name.localeCompare(b.name);
+    });
+
+    res.json({ success: true, data: branches });
+  } catch (error) {
+    res.json({ success: false, error: String(error) });
+  }
+});
+
+app.get('/api/changelog/tags', (req, res) => {
+  const { projectId } = req.query;
+  const store = loadStore();
+  const project = store.projects.find((p) => p.id === projectId);
+
+  if (!project) {
+    return res.status(404).json({ success: false, error: 'Project not found' });
+  }
+
+  const { execSync } = require('child_process');
+  try {
+    const output = execSync(
+      'git tag -l --sort=-creatordate --format="%(refname:short)|%(creatordate:iso-strict)|%(objectname:short)"',
+      { cwd: project.path, encoding: 'utf-8' }
+    );
+
+    const tags: { name: string; date?: string; commit?: string }[] = [];
+    for (const line of output.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      const parts = trimmed.split('|');
+      if (parts[0]) {
+        tags.push({ name: parts[0], date: parts[1], commit: parts[2] });
+      }
+    }
+
+    res.json({ success: true, data: tags });
+  } catch (error) {
+    res.json({ success: false, error: String(error) });
+  }
+});
+
+app.post('/api/changelog/commits-preview', (req, res) => {
+  const { projectId } = req.query;
+  const { options, mode } = req.body;
+  const store = loadStore();
+  const project = store.projects.find((p) => p.id === projectId);
+
+  if (!project) {
+    return res.status(404).json({ success: false, error: 'Project not found' });
+  }
+
+  const { execSync } = require('child_process');
+  try {
+    const format = '%h|%H|%s|%an|%ae|%aI';
+    let command = `git log --pretty=format:"${format}"`;
+
+    if (mode === 'git-history') {
+      if (!options.includeMergeCommits) command += ' --no-merges';
+      switch (options.type) {
+        case 'recent':
+          command += ` -n ${options.count || 25}`;
+          break;
+        case 'since-date':
+          if (options.sinceDate) command += ` --since="${options.sinceDate}"`;
+          break;
+        case 'tag-range':
+          if (options.fromTag) command += ` ${options.fromTag}..${options.toTag || 'HEAD'}`;
+          break;
+        case 'since-version':
+          if (options.fromTag) command += ` ${options.fromTag}..HEAD`;
+          break;
+      }
+    } else if (mode === 'branch-diff') {
+      command += ` --no-merges ${options.baseBranch}..${options.compareBranch}`;
+    }
+
+    const output = execSync(command, {
+      cwd: project.path,
+      encoding: 'utf-8',
+      maxBuffer: 10 * 1024 * 1024
+    });
+
+    const commits = output.split('\n').filter(Boolean).map((line: string) => {
+      const parts = line.split('|');
+      return {
+        shortHash: parts[0],
+        hash: parts[1],
+        message: parts[2],
+        author: parts[3],
+        email: parts[4],
+        date: parts[5]
+      };
+    });
+
+    res.json({ success: true, data: commits });
+  } catch (error) {
+    res.json({ success: false, error: String(error) });
+  }
+});
+
+app.post('/api/changelog/save', (req, res) => {
+  const { projectId } = req.query;
+  const { content, version, createGitTag, tagMessage } = req.body;
+  const store = loadStore();
+  const project = store.projects.find((p) => p.id === projectId);
+
+  if (!project) {
+    return res.status(404).json({ success: false, error: 'Project not found' });
+  }
+
+  const { execSync } = require('child_process');
+  try {
+    // Write changelog file
+    const changelogPath = path.join(project.path, 'CHANGELOG.md');
+    writeFileSync(changelogPath, content);
+
+    // Create git tag if requested
+    if (createGitTag && version) {
+      const tagName = version.startsWith('v') ? version : `v${version}`;
+      const message = tagMessage || `Release ${tagName}`;
+      execSync(`git tag -a "${tagName}" -m "${message}"`, {
+        cwd: project.path,
+        encoding: 'utf-8'
+      });
+    }
+
+    res.json({
+      success: true,
+      data: {
+        path: changelogPath,
+        version,
+        tagCreated: createGitTag && version
+      }
+    });
+  } catch (error) {
+    res.json({ success: false, error: String(error) });
+  }
+});
+
+app.post('/api/changelog/suggest-version', (req, res) => {
+  const { projectId } = req.query;
+  const { taskIds } = req.body;
+  const store = loadStore();
+  const project = store.projects.find((p) => p.id === projectId);
+
+  if (!project) {
+    return res.status(404).json({ success: false, error: 'Project not found' });
+  }
+
+  // Get current version from existing changelog or tags
+  const changelogPath = path.join(project.path, 'CHANGELOG.md');
+  let currentVersion = '0.0.0';
+
+  if (existsSync(changelogPath)) {
+    const content = readFileSync(changelogPath, 'utf-8');
+    const versionMatch = content.match(/##\s*\[?v?(\d+\.\d+\.\d+)/);
+    if (versionMatch) currentVersion = versionMatch[1];
+  }
+
+  // Simple version bump based on number of tasks (heuristic)
+  const [major, minor, patch] = currentVersion.split('.').map(Number);
+  let suggestedVersion: string;
+  let reason: string;
+
+  if (taskIds && taskIds.length > 5) {
+    suggestedVersion = `${major}.${minor + 1}.0`;
+    reason = 'feature';
+  } else {
+    suggestedVersion = `${major}.${minor}.${patch + 1}`;
+    reason = 'patch';
+  }
+
+  res.json({ success: true, data: { version: suggestedVersion, reason } });
+});
+
+app.post('/api/changelog/save-image', (req, res) => {
+  const { projectId } = req.query;
+  const { imageData, filename } = req.body;
+  const store = loadStore();
+  const project = store.projects.find((p) => p.id === projectId);
+
+  if (!project) {
+    return res.status(404).json({ success: false, error: 'Project not found' });
+  }
+
+  try {
+    const assetsDir = path.join(project.path, '.github', 'assets');
+    if (!existsSync(assetsDir)) {
+      mkdirSync(assetsDir, { recursive: true });
+    }
+
+    const base64Data = imageData.includes(',') ? imageData.split(',')[1] : imageData;
+    const buffer = Buffer.from(base64Data, 'base64');
+    const imagePath = path.join(assetsDir, filename);
+    writeFileSync(imagePath, buffer);
+
+    const relativePath = `.github/assets/${filename}`;
+    res.json({ success: true, data: { relativePath, url: relativePath } });
+  } catch (error) {
+    res.json({ success: false, error: String(error) });
+  }
+});
+
+app.post('/api/changelog/generate', async (req, res) => {
+  const { projectId } = req.query;
+  const request = req.body;
+  const store = loadStore();
+  const project = store.projects.find((p) => p.id === projectId);
+
+  if (!project) {
+    return res.status(404).json({ success: false, error: 'Project not found' });
+  }
+
+  const { spawn, execSync } = require('child_process');
+
+  // Find claude binary
+  let claudePath = 'claude';
+  try {
+    claudePath = execSync('which claude', { encoding: 'utf-8' }).trim();
+  } catch {
+    // Try common paths
+    const paths = ['/usr/local/bin/claude', '/usr/bin/claude', `${process.env.HOME}/.claude/bin/claude`];
+    for (const p of paths) {
+      if (existsSync(p)) { claudePath = p; break; }
+    }
+  }
+
+  // Build prompt based on source mode
+  let prompt = '';
+  const version = request.version || '1.0.0';
+  const date = request.date || new Date().toISOString().split('T')[0];
+  const format = request.format || 'keep-a-changelog';
+  const audience = request.audience || 'technical';
+
+  const audienceInstructions: Record<string, string> = {
+    'technical': 'You are a technical documentation specialist creating a changelog for developers. Use precise technical language.',
+    'user-facing': 'You are a product manager writing release notes for end users. Use clear, non-technical language focusing on user benefits.',
+    'marketing': 'You are a marketing specialist writing release notes. Focus on outcomes and user impact with compelling language.'
+  };
+
+  broadcast('changelog:generationProgress', { projectId, progress: { stage: 'preparing', progress: 10, message: 'Preparing prompt...' } });
+
+  if (request.sourceMode === 'git-history' && request.gitHistory) {
+    // Get commits from git
+    const gitFormat = '%h|%H|%s|%an|%ae|%aI';
+    let gitCommand = `git log --pretty=format:"${gitFormat}" --no-merges`;
+
+    switch (request.gitHistory.type) {
+      case 'recent':
+        gitCommand += ` -n ${request.gitHistory.count || 25}`;
+        break;
+      case 'since-date':
+        if (request.gitHistory.sinceDate) gitCommand += ` --since="${request.gitHistory.sinceDate}"`;
+        break;
+      case 'tag-range':
+        if (request.gitHistory.fromTag) gitCommand += ` ${request.gitHistory.fromTag}..${request.gitHistory.toTag || 'HEAD'}`;
+        break;
+    }
+
+    try {
+      const output = execSync(gitCommand, { cwd: project.path, encoding: 'utf-8', maxBuffer: 10 * 1024 * 1024 });
+      const commits = output.split('\n').filter(Boolean).map((line: string) => {
+        const parts = line.split('|');
+        return { hash: parts[0], subject: parts[2], author: parts[3] };
+      });
+
+      const commitLines = commits.map((c: { hash: string; subject: string; author: string }) =>
+        `- ${c.hash} | ${c.subject} | by ${c.author}`
+      ).join('\n');
+
+      prompt = `${audienceInstructions[audience]}
+
+Generate a changelog in ${format} format for version ${version} (${date}).
+
+Commits:
+${commitLines}
+
+CRITICAL: Output ONLY the raw changelog content. Start directly with the changelog heading.`;
+    } catch (e) {
+      return res.json({ success: false, error: `Failed to get commits: ${e}` });
+    }
+  } else if (request.taskIds && request.taskIds.length > 0) {
+    // Load specs for tasks
+    const taskSummaries: string[] = [];
+    for (const taskId of request.taskIds) {
+      const specPath = path.join(project.path, '.auto-claude', 'specs', taskId, 'spec.md');
+      if (existsSync(specPath)) {
+        const content = readFileSync(specPath, 'utf-8');
+        const titleMatch = content.match(/^#\s+(.+)/m);
+        taskSummaries.push(`- ${titleMatch ? titleMatch[1] : taskId}: ${content.slice(0, 300)}...`);
+      }
+    }
+
+    prompt = `${audienceInstructions[audience]}
+
+Generate a changelog in ${format} format for version ${version} (${date}).
+
+Completed tasks:
+${taskSummaries.join('\n')}
+
+CRITICAL: Output ONLY the raw changelog content. Start directly with the changelog heading.`;
+  } else {
+    return res.json({ success: false, error: 'No source provided (commits or tasks)' });
+  }
+
+  broadcast('changelog:generationProgress', { projectId, progress: { stage: 'generating', progress: 30, message: 'Generating with Claude AI...' } });
+
+  // Call Claude CLI
+  const base64Prompt = Buffer.from(prompt, 'utf-8').toString('base64');
+  const pythonScript = `
+import subprocess
+import sys
+import base64
+
+try:
+    prompt = base64.b64decode('${base64Prompt}').decode('utf-8')
+    result = subprocess.run(
+        ['${claudePath}', '-p', prompt, '--output-format', 'text', '--model', 'haiku'],
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+        timeout=300
+    )
+    if result.returncode == 0:
+        print(result.stdout)
+    else:
+        print(f"Error: {result.stderr}", file=sys.stderr)
+        sys.exit(1)
+except Exception as e:
+    print(f"Error: {e}", file=sys.stderr)
+    sys.exit(1)
+`;
+
+  const pythonPath = existsSync('/usr/bin/python3') ? '/usr/bin/python3' : 'python3';
+  const child = spawn(pythonPath, ['-c', pythonScript], { cwd: project.path });
+
+  let output = '';
+  let errorOutput = '';
+
+  child.stdout?.on('data', (data: Buffer) => {
+    output += data.toString();
+    broadcast('changelog:generationProgress', { projectId, progress: { stage: 'generating', progress: 60, message: 'Receiving response...' } });
+  });
+
+  child.stderr?.on('data', (data: Buffer) => {
+    errorOutput += data.toString();
+  });
+
+  child.on('exit', (code: number | null) => {
+    if (code === 0 && output.trim()) {
+      broadcast('changelog:generationProgress', { projectId, progress: { stage: 'complete', progress: 100, message: 'Complete' } });
+      broadcast('changelog:generationComplete', { projectId, result: { changelog: output.trim(), version, date } });
+      res.json({ success: true, data: { changelog: output.trim(), version, date } });
+    } else {
+      broadcast('changelog:generationError', { projectId, error: errorOutput || 'Generation failed' });
+      res.json({ success: false, error: errorOutput || 'Generation failed' });
+    }
+  });
+
+  child.on('error', (err: Error) => {
+    broadcast('changelog:generationError', { projectId, error: err.message });
+    res.json({ success: false, error: err.message });
+  });
+});
+
 app.post('/api/git/init', (req, res) => {
   const { path: projectPath } = req.query;
   if (!projectPath || !existsSync(String(projectPath))) {
@@ -3100,7 +5304,7 @@ app.use((_req, res) => {
 });
 
 // Start server
-server.listen(PORT, () => {
+server.listen(PORT, async () => {
   console.log(`
 ╔═══════════════════════════════════════════════════════════╗
 ║                  Auto-Claude Web Server                    ║
@@ -3109,10 +5313,13 @@ server.listen(PORT, () => {
 ║  WebSocket: ws://0.0.0.0:${PORT}/ws                          ║
 ╚═══════════════════════════════════════════════════════════╝
 `);
+
+  // Initialize FalkorDB (auto-starts container if Docker is available)
+  await initializeFalkorDB();
 });
 
 // Graceful shutdown
-process.on('SIGTERM', () => {
+process.on('SIGTERM', async () => {
   console.log('[WebServer] Shutting down...');
 
   // Kill all terminals
@@ -3122,6 +5329,12 @@ process.on('SIGTERM', () => {
   // Kill all running tasks
   runningTasks.forEach((t) => t.process.kill());
   runningTasks.clear();
+
+  // Close FalkorDB connection
+  if (falkordbRedis) {
+    await falkordbRedis.quit().catch(() => {});
+    falkordbRedis = null;
+  }
 
   server.close(() => process.exit(0));
 });

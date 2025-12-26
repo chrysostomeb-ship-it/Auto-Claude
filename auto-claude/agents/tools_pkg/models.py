@@ -44,8 +44,8 @@ ELECTRON_TOOLS = [
 ]
 
 # Base tools available to all agents
-BASE_READ_TOOLS = ["Read", "Glob", "Grep"]
-BASE_WRITE_TOOLS = ["Write", "Edit", "Bash"]
+BASE_READ_TOOLS = ["Read", "Glob", "Grep", "WebSearch", "WebFetch", "LSP"]
+BASE_WRITE_TOOLS = ["Write", "Edit", "Bash", "Task", "TodoWrite", "NotebookEdit", "AskUserQuestion"]
 
 # =============================================================================
 # Configuration
