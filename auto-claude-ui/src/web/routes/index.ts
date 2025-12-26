@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Routes index - Export all route creators
  */

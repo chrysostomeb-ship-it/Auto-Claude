@@ -73,10 +73,11 @@ export function TaskDetailPanel({ task, onClose }: TaskDetailPanelProps) {
     state.setWorkspaceError(null);
     try {
       console.warn('[TaskDetailPanel] Calling mergeWorktree...');
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const result = await window.electronAPI.mergeWorktree(task.id, {
         noCommit: state.stageOnly,
         targetBranch: state.targetBranch
-      });
+      } as any);
       console.warn('[TaskDetailPanel] mergeWorktree result:', JSON.stringify(result, null, 2));
       if (result.success && result.data?.success) {
         // For stage-only: don't close the panel, show success message

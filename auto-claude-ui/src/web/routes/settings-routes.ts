@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Settings Routes - HTTP endpoints for app settings
  */

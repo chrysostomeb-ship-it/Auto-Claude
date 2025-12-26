@@ -153,7 +153,7 @@ export function PhaseProgressIndicator({
       {/* Subtask indicators (only show when subtasks exist) */}
       {totalSubtasks > 0 && (
         <div className="flex flex-wrap gap-1.5 mt-2">
-          {subtasks.slice(0, 10).map((subtask, index) => (
+          {subtasks?.slice(0, 10).map((subtask, index) => (
             <motion.div
               key={subtask.id || `subtask-${index}`}
               className={cn(

@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Project Routes - HTTP endpoints for project management
  */

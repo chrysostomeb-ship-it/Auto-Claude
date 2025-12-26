@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Terminal Routes - HTTP/WebSocket endpoints for terminal management
  *

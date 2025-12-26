@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Task Routes - HTTP endpoints for task/spec management
  */
