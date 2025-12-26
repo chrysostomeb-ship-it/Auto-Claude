@@ -85,6 +85,12 @@ from core.workspace.git_utils import (
     get_existing_build_worktree,
 )
 from core.workspace.git_utils import (
+    apply_path_mapping as _apply_path_mapping,
+)
+from core.workspace.git_utils import (
+    detect_file_renames as _detect_file_renames,
+)
+from core.workspace.git_utils import (
     get_changed_files_from_branch as _get_changed_files_from_branch,
 )
 from core.workspace.git_utils import (
@@ -731,6 +737,23 @@ def _resolve_git_conflicts_with_ai(
         merge_base=merge_base[:12] if merge_base else None,
     )
 
+    # Detect file renames between merge-base and target branch
+    # This handles cases where files were moved/renamed (e.g., directory restructures)
+    path_mappings: dict[str, str] = {}
+    if merge_base:
+        path_mappings = _detect_file_renames(project_dir, merge_base, base_branch)
+        if path_mappings:
+            debug(
+                MODULE,
+                f"Detected {len(path_mappings)} file renames between merge-base and target",
+                sample_mappings=dict(list(path_mappings.items())[:5]),
+            )
+            print(
+                muted(
+                    f"  Detected {len(path_mappings)} file rename(s) since branch creation"
+                )
+            )
+
     # FIX: Copy NEW files FIRST before resolving conflicts
     # This ensures dependencies exist before files that import them are written
     changed_files = _get_changed_files_from_branch(
@@ -748,14 +771,24 @@ def _resolve_git_conflicts_with_ai(
                     project_dir, spec_branch, file_path
                 )
                 if content is not None:
-                    target_path = project_dir / file_path
+                    # Apply path mapping - write to new location if file was renamed
+                    target_file_path = _apply_path_mapping(file_path, path_mappings)
+                    target_path = project_dir / target_file_path
                     target_path.parent.mkdir(parents=True, exist_ok=True)
                     target_path.write_text(content, encoding="utf-8")
                     subprocess.run(
-                        ["git", "add", file_path], cwd=project_dir, capture_output=True
+                        ["git", "add", target_file_path],
+                        cwd=project_dir,
+                        capture_output=True,
                     )
-                    resolved_files.append(file_path)
-                    debug(MODULE, f"Copied new file: {file_path}")
+                    resolved_files.append(target_file_path)
+                    if target_file_path != file_path:
+                        debug(
+                            MODULE,
+                            f"Copied new file with path mapping: {file_path} -> {target_file_path}",
+                        )
+                    else:
+                        debug(MODULE, f"Copied new file: {file_path}")
             except Exception as e:
                 debug_warning(MODULE, f"Could not copy new file {file_path}: {e}")
 
@@ -769,20 +802,26 @@ def _resolve_git_conflicts_with_ai(
     debug(MODULE, "Categorizing conflicting files for parallel processing")
 
     for file_path in conflicting_files:
-        debug(MODULE, f"Categorizing conflicting file: {file_path}")
+        # Apply path mapping to get the target path in the current branch
+        target_file_path = _apply_path_mapping(file_path, path_mappings)
+        debug(
+            MODULE,
+            f"Categorizing conflicting file: {file_path}"
+            + (f" -> {target_file_path}" if target_file_path != file_path else ""),
+        )
 
         try:
-            # Get content from main branch
+            # Get content from main branch using MAPPED path (file may have been renamed)
             main_content = _get_file_content_from_ref(
-                project_dir, base_branch, file_path
+                project_dir, base_branch, target_file_path
             )
 
-            # Get content from worktree branch
+            # Get content from worktree branch using ORIGINAL path
             worktree_content = _get_file_content_from_ref(
                 project_dir, spec_branch, file_path
             )
 
-            # Get content from merge-base (common ancestor)
+            # Get content from merge-base (common ancestor) using ORIGINAL path
             base_content = None
             if merge_base:
                 base_content = _get_file_content_from_ref(
@@ -795,38 +834,48 @@ def _resolve_git_conflicts_with_ai(
 
             if main_content is None:
                 # File only exists in worktree - it's a new file (no AI needed)
-                simple_merges.append((file_path, worktree_content))
+                # Write to target path (mapped if applicable)
+                simple_merges.append((target_file_path, worktree_content))
                 debug(MODULE, f"  {file_path}: new file (no AI needed)")
             elif worktree_content is None:
                 # File only exists in main - was deleted in worktree (no AI needed)
-                simple_merges.append((file_path, None))  # None = delete
+                simple_merges.append((target_file_path, None))  # None = delete
                 debug(MODULE, f"  {file_path}: deleted (no AI needed)")
             else:
                 # File exists in both - check if it's a lock file
-                if _is_lock_file(file_path):
+                if _is_lock_file(target_file_path):
                     # Lock files should be excluded from merge entirely
                     # They must be regenerated after merge by running the package manager
                     # (e.g., npm install, pnpm install, uv sync, cargo update)
                     #
                     # Strategy: Take main branch version and let user regenerate
-                    lock_files_excluded.append(file_path)
-                    simple_merges.append((file_path, main_content))
+                    lock_files_excluded.append(target_file_path)
+                    simple_merges.append((target_file_path, main_content))
                     debug(
                         MODULE,
-                        f"  {file_path}: lock file (excluded - will use main version)",
+                        f"  {target_file_path}: lock file (excluded - will use main version)",
                     )
                 else:
                     # Regular file - needs AI merge
+                    # Store the TARGET path for writing, but track original for content retrieval
                     files_needing_ai_merge.append(
                         ParallelMergeTask(
-                            file_path=file_path,
+                            file_path=target_file_path,  # Use target path for writing
                             main_content=main_content,
                             worktree_content=worktree_content,
                             base_content=base_content,
                             spec_name=spec_name,
                         )
                     )
-                    debug(MODULE, f"  {file_path}: needs AI merge")
+                    debug(
+                        MODULE,
+                        f"  {file_path}: needs AI merge"
+                        + (
+                            f" (will write to {target_file_path})"
+                            if target_file_path != file_path
+                            else ""
+                        ),
+                    )
 
         except Exception as e:
             print(error(f"    ✗ Failed to categorize {file_path}: {e}"))
@@ -947,28 +996,40 @@ def _resolve_git_conflicts_with_ai(
     ]
 
     for file_path, status in non_conflicting:
+        # Apply path mapping for renamed/moved files
+        target_file_path = _apply_path_mapping(file_path, path_mappings)
+
         try:
             if status == "D":
-                # Deleted in worktree
-                target_path = project_dir / file_path
+                # Deleted in worktree - delete from target path
+                target_path = project_dir / target_file_path
                 if target_path.exists():
                     target_path.unlink()
                     subprocess.run(
-                        ["git", "add", file_path], cwd=project_dir, capture_output=True
+                        ["git", "add", target_file_path],
+                        cwd=project_dir,
+                        capture_output=True,
                     )
             else:
-                # Added or modified - copy from worktree
+                # Modified - get content from worktree (original path), write to target (mapped path)
                 content = _get_file_content_from_ref(
                     project_dir, spec_branch, file_path
                 )
                 if content is not None:
-                    target_path = project_dir / file_path
+                    target_path = project_dir / target_file_path
                     target_path.parent.mkdir(parents=True, exist_ok=True)
                     target_path.write_text(content, encoding="utf-8")
                     subprocess.run(
-                        ["git", "add", file_path], cwd=project_dir, capture_output=True
+                        ["git", "add", target_file_path],
+                        cwd=project_dir,
+                        capture_output=True,
                     )
-                    resolved_files.append(file_path)
+                    resolved_files.append(target_file_path)
+                    if target_file_path != file_path:
+                        debug(
+                            MODULE,
+                            f"Merged with path mapping: {file_path} -> {target_file_path}",
+                        )
         except Exception as e:
             print(muted(f"    Warning: Could not process {file_path}: {e}"))
 
