@@ -510,10 +510,13 @@ function startLogWatching(specId: string, projectPath: string): void {
 
   let lastContent = '';
   let lastWorktreeContent = '';
+  let lastPlanStatus = '';
 
   // Load initial content
   const mainLogFile = path.join(specDir, 'task_logs.json');
   const worktreeLogFile = path.join(worktreeSpecDir, 'task_logs.json');
+  const mainPlanFile = path.join(specDir, 'implementation_plan.json');
+  const worktreePlanFile = path.join(worktreeSpecDir, 'implementation_plan.json');
 
   if (existsSync(mainLogFile)) {
     try {
@@ -523,6 +526,15 @@ function startLogWatching(specId: string, projectPath: string): void {
   if (existsSync(worktreeLogFile)) {
     try {
       lastWorktreeContent = readFileSync(worktreeLogFile, 'utf-8');
+    } catch {}
+  }
+
+  // Load initial plan status
+  const planFile = existsSync(worktreePlanFile) ? worktreePlanFile : mainPlanFile;
+  if (existsSync(planFile)) {
+    try {
+      const plan = JSON.parse(readFileSync(planFile, 'utf-8'));
+      lastPlanStatus = plan.status || '';
     } catch {}
   }
 
@@ -557,6 +569,20 @@ function startLogWatching(specId: string, projectPath: string): void {
 
     if (changed && newLogs) {
       broadcast('task:logsChanged', { specId, logs: newLogs });
+    }
+
+    // Check for plan status changes (ai_review, human_review, etc.)
+    const currentPlanFile = existsSync(worktreePlanFile) ? worktreePlanFile : mainPlanFile;
+    if (existsSync(currentPlanFile)) {
+      try {
+        const plan = JSON.parse(readFileSync(currentPlanFile, 'utf-8'));
+        const currentStatus = plan.status || '';
+        if (currentStatus && currentStatus !== lastPlanStatus) {
+          console.log(`[LogWatcher] Status changed for ${specId}: ${lastPlanStatus} -> ${currentStatus}`);
+          lastPlanStatus = currentStatus;
+          broadcast('task:statusChange', { taskId: specId, status: currentStatus });
+        }
+      } catch {}
     }
   }, 1000);
 
