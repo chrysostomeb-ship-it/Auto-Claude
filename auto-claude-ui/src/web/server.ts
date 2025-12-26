@@ -1522,6 +1522,19 @@ app.post('/api/tasks/:id/start', (req, res) => {
     projectPath: project.path
   });
 
+  // Detect current branch to use as parent branch for merge
+  let parentBranch = '';
+  try {
+    const { execSync } = require('child_process');
+    parentBranch = execSync('git rev-parse --abbrev-ref HEAD', {
+      cwd: project.path,
+      encoding: 'utf-8'
+    }).trim();
+    console.log('[Task Start] Parent branch detected:', parentBranch);
+  } catch (err) {
+    console.error('[Task Start] Failed to detect parent branch:', err);
+  }
+
   // Update implementation_plan.json status to 'in_progress' (persist to disk like Electron)
   const planPath = path.join(project.path, '.auto-claude', 'specs', taskId, 'implementation_plan.json');
   if (existsSync(planPath)) {
@@ -1530,6 +1543,11 @@ app.post('/api/tasks/:id/start', (req, res) => {
       plan.status = 'in_progress';
       plan.planStatus = 'in_progress';
       plan.updated_at = new Date().toISOString();
+      // Store parent branch for merge target (only if not already set)
+      if (!plan.parent_branch && parentBranch) {
+        plan.parent_branch = parentBranch;
+        console.log('[Task Start] Stored parent_branch:', parentBranch);
+      }
       writeFileSync(planPath, JSON.stringify(plan, null, 2));
       console.log('[Task Start] Updated implementation_plan.json status to in_progress');
     } catch (err) {
@@ -2767,15 +2785,27 @@ app.get('/api/tasks/:id/worktree/status', (req, res) => {
       encoding: 'utf-8'
     }).trim();
 
-    // Get base branch - the current branch in the main project
+    // Get base branch from implementation_plan.json (parent_branch) or fallback to current branch
     let baseBranch = 'main';
-    try {
-      baseBranch = execSync('git rev-parse --abbrev-ref HEAD', {
-        cwd: project.path,
-        encoding: 'utf-8'
-      }).trim();
-    } catch {
-      baseBranch = 'main';
+    const planPath = path.join(project.path, '.auto-claude', 'specs', req.params.id, 'implementation_plan.json');
+    if (existsSync(planPath)) {
+      try {
+        const plan = JSON.parse(readFileSync(planPath, 'utf-8'));
+        if (plan.parent_branch) {
+          baseBranch = plan.parent_branch;
+        }
+      } catch {}
+    }
+    // Fallback to current branch in main project if no parent_branch
+    if (baseBranch === 'main') {
+      try {
+        baseBranch = execSync('git rev-parse --abbrev-ref HEAD', {
+          cwd: project.path,
+          encoding: 'utf-8'
+        }).trim();
+      } catch {
+        baseBranch = 'main';
+      }
     }
 
     // Get commit count
@@ -2847,15 +2877,27 @@ app.get('/api/tasks/:id/worktree/diff', (req, res) => {
     return res.json({ success: false, error: 'No worktree found for this task' });
   }
 
-  // Get base branch - the current branch in the main project
+  // Get base branch from implementation_plan.json (parent_branch) or fallback to current branch
   let baseBranch = 'main';
-  try {
-    baseBranch = execSync('git rev-parse --abbrev-ref HEAD', {
-      cwd: project.path,
-      encoding: 'utf-8'
-    }).trim();
-  } catch {
-    baseBranch = 'main';
+  const planPath = path.join(project.path, '.auto-claude', 'specs', req.params.id, 'implementation_plan.json');
+  if (existsSync(planPath)) {
+    try {
+      const plan = JSON.parse(readFileSync(planPath, 'utf-8'));
+      if (plan.parent_branch) {
+        baseBranch = plan.parent_branch;
+      }
+    } catch {}
+  }
+  // Fallback to current branch in main project if no parent_branch
+  if (baseBranch === 'main') {
+    try {
+      baseBranch = execSync('git rev-parse --abbrev-ref HEAD', {
+        cwd: project.path,
+        encoding: 'utf-8'
+      }).trim();
+    } catch {
+      baseBranch = 'main';
+    }
   }
 
   try {
@@ -2951,14 +2993,28 @@ app.post('/api/tasks/:id/worktree/merge', (req, res) => {
   try {
     const branchName = `auto-claude/${taskId}`;
 
-    // Use targetBranch if provided, otherwise detect base branch (main or master)
+    // Use targetBranch if provided, otherwise read parent_branch from plan, fallback to main/master
     let baseBranch = targetBranch;
     if (!baseBranch) {
-      try {
-        execSync('git rev-parse --verify main', { cwd: project.path, encoding: 'utf-8', stdio: 'pipe' });
-        baseBranch = 'main';
-      } catch {
-        baseBranch = 'master';
+      // Try to read parent_branch from implementation_plan.json
+      const planPath = path.join(project.path, '.auto-claude', 'specs', taskId, 'implementation_plan.json');
+      if (existsSync(planPath)) {
+        try {
+          const plan = JSON.parse(readFileSync(planPath, 'utf-8'));
+          if (plan.parent_branch) {
+            baseBranch = plan.parent_branch;
+            console.log('[Merge] Using parent_branch from plan:', baseBranch);
+          }
+        } catch {}
+      }
+      // Fallback to main/master if no parent_branch stored
+      if (!baseBranch) {
+        try {
+          execSync('git rev-parse --verify main', { cwd: project.path, encoding: 'utf-8', stdio: 'pipe' });
+          baseBranch = 'main';
+        } catch {
+          baseBranch = 'master';
+        }
       }
     }
 
