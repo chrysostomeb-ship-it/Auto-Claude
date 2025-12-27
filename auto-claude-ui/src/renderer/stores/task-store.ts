@@ -65,9 +65,9 @@ export const useTaskStore = create<TaskState>((set, get) => ({
       tasks: state.tasks.map((t) => {
         if (t.id !== taskId && t.specId !== taskId) return t;
 
-        // Extract subtasks from plan
-        const subtasks: Subtask[] = plan.phases.flatMap((phase) =>
-          phase.subtasks.map((subtask) => ({
+        // Extract subtasks from plan (with null safety)
+        const subtasks: Subtask[] = (plan.phases || []).flatMap((phase) =>
+          (phase.subtasks || []).map((subtask) => ({
             id: subtask.id,
             title: subtask.description,
             description: subtask.description,

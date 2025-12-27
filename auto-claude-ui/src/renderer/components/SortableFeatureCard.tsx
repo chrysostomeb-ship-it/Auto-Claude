@@ -54,7 +54,7 @@ export function SortableFeatureCard({
     !!feature.competitorInsightIds && feature.competitorInsightIds.length > 0;
 
   // Get phase name for the feature
-  const phaseName = roadmap?.phases.find((p) => p.id === feature.phaseId)?.name;
+  const phaseName = roadmap?.phases?.find((p) => p.id === feature.phaseId)?.name;
 
   // Check if feature has external source (e.g., Canny)
   const isExternal = feature.source?.provider && feature.source.provider !== 'internal';
