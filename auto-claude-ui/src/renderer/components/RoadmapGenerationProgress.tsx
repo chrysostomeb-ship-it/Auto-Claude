@@ -220,7 +220,8 @@ export function RoadmapGenerationProgress({
     return null;
   }
 
-  const config = PHASE_CONFIG[phase];
+  // Fallback to analyzing if phase is unknown
+  const config = PHASE_CONFIG[phase] || PHASE_CONFIG['analyzing'];
   const Icon = config.icon;
   const isActivePhase = phase !== 'complete' && phase !== 'error';
 

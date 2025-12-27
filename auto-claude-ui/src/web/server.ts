@@ -1850,6 +1850,9 @@ app.post('/api/roadmap/generate', (req, res) => {
 
     roadmapProcesses.set(projectId, child);
 
+    // Track current phase for non-JSON output
+    let currentPhase = 'analyzing';
+
     child.stdout?.on('data', (data) => {
       const output = data.toString();
       console.log(`[Roadmap stdout] ${projectId}:`, output.substring(0, 200));
@@ -1859,14 +1862,19 @@ app.post('/api/roadmap/generate', (req, res) => {
         if (line.startsWith('{')) {
           try {
             const status = JSON.parse(line);
-            broadcast('roadmap:progress', { projectId, status });
+            // Update tracked phase if present
+            if (status.phase) {
+              currentPhase = status.phase;
+            }
+            // Ensure phase is always set
+            broadcast('roadmap:progress', { projectId, status: { phase: currentPhase, progress: 0, ...status } });
           } catch {
-            // Not valid JSON, broadcast as message
-            broadcast('roadmap:progress', { projectId, status: { message: line } });
+            // Not valid JSON, broadcast as message with current phase
+            broadcast('roadmap:progress', { projectId, status: { phase: currentPhase, progress: 0, message: line } });
           }
         } else if (line.trim()) {
-          // Non-JSON output - broadcast as progress message
-          broadcast('roadmap:progress', { projectId, status: { message: line } });
+          // Non-JSON output - broadcast as progress message with current phase
+          broadcast('roadmap:progress', { projectId, status: { phase: currentPhase, progress: 0, message: line } });
         }
       }
     });
@@ -1874,7 +1882,7 @@ app.post('/api/roadmap/generate', (req, res) => {
     child.stderr?.on('data', (data) => {
       const errOutput = data.toString();
       console.error(`[Roadmap stderr] ${projectId}:`, errOutput);
-      broadcast('roadmap:progress', { projectId, status: { error: errOutput } });
+      broadcast('roadmap:progress', { projectId, status: { phase: currentPhase, progress: 0, error: errOutput } });
     });
 
     child.on('close', (code) => {
