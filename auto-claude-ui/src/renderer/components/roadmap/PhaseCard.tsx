@@ -89,19 +89,24 @@ export function PhaseCard({
           {features.slice(0, 5).map((feature) => (
             <div
               key={feature.id}
-              className="flex items-center justify-between p-2 rounded-md bg-muted/50 hover:bg-muted cursor-pointer transition-colors"
+              className="flex items-start justify-between p-2 rounded-md bg-muted/50 hover:bg-muted cursor-pointer transition-colors"
               onClick={() => onFeatureSelect(feature)}
             >
-              <div className="flex items-center gap-2 flex-1 min-w-0">
-                <Badge
-                  variant="outline"
-                  className={`text-xs ${ROADMAP_PRIORITY_COLORS[feature.priority]}`}
-                >
-                  {feature.priority}
-                </Badge>
-                <span className="text-sm truncate">{feature.title}</span>
-                {feature.competitorInsightIds && feature.competitorInsightIds.length > 0 && (
-                  <TrendingUp className="h-3 w-3 text-primary flex-shrink-0" />
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2">
+                  <Badge
+                    variant="outline"
+                    className={`text-xs ${ROADMAP_PRIORITY_COLORS[feature.priority]}`}
+                  >
+                    {feature.priority}
+                  </Badge>
+                  <span className="text-sm font-medium truncate">{feature.title}</span>
+                  {feature.competitorInsightIds && feature.competitorInsightIds.length > 0 && (
+                    <TrendingUp className="h-3 w-3 text-primary flex-shrink-0" />
+                  )}
+                </div>
+                {feature.description && (
+                  <p className="text-xs text-muted-foreground mt-1 line-clamp-2">{feature.description}</p>
                 )}
               </div>
               {feature.status === 'done' ? (
