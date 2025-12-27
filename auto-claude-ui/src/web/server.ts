@@ -1817,15 +1817,23 @@ app.post('/api/roadmap/generate', (req, res) => {
 
   // Find Python and roadmap script
   const autoBuildPath = getAutoBuildPath();
+  console.log('[Roadmap] autoBuildPath:', autoBuildPath);
   if (!autoBuildPath) {
+    console.error('[Roadmap] ERROR: getAutoBuildPath() returned null');
     broadcast('roadmap:error', { projectId, error: 'Auto-Claude not installed' });
     return res.json({ success: true, data: { started: false } });
   }
   const pythonPath = path.join(autoBuildPath, '.venv/bin/python');
   const roadmapScript = path.join(autoBuildPath, 'runners', 'roadmap_runner.py');
 
+  console.log('[Roadmap] pythonPath:', pythonPath, 'exists:', existsSync(pythonPath));
+  console.log('[Roadmap] roadmapScript:', roadmapScript, 'exists:', existsSync(roadmapScript));
+
   if (!existsSync(pythonPath) || !existsSync(roadmapScript)) {
-    broadcast('roadmap:error', { projectId, error: 'Auto-Claude not installed or roadmap script not found' });
+    console.error('[Roadmap] ERROR: Python or script not found');
+    console.error('[Roadmap] pythonPath exists:', existsSync(pythonPath));
+    console.error('[Roadmap] roadmapScript exists:', existsSync(roadmapScript));
+    broadcast('roadmap:error', { projectId, error: `Auto-Claude not installed or roadmap script not found. pythonPath=${pythonPath} (${existsSync(pythonPath)}), script=${roadmapScript} (${existsSync(roadmapScript)})` });
     return res.json({ success: true, data: { started: false } });
   }
 
