@@ -1852,22 +1852,29 @@ app.post('/api/roadmap/generate', (req, res) => {
 
     child.stdout?.on('data', (data) => {
       const output = data.toString();
+      console.log(`[Roadmap stdout] ${projectId}:`, output.substring(0, 200));
       // Try to parse progress updates
-      try {
-        const lines = output.split('\n').filter((l: string) => l.trim());
-        for (const line of lines) {
-          if (line.startsWith('{')) {
+      const lines = output.split('\n').filter((l: string) => l.trim());
+      for (const line of lines) {
+        if (line.startsWith('{')) {
+          try {
             const status = JSON.parse(line);
             broadcast('roadmap:progress', { projectId, status });
+          } catch {
+            // Not valid JSON, broadcast as message
+            broadcast('roadmap:progress', { projectId, status: { message: line } });
           }
+        } else if (line.trim()) {
+          // Non-JSON output - broadcast as progress message
+          broadcast('roadmap:progress', { projectId, status: { message: line } });
         }
-      } catch {
-        // Not JSON, ignore
       }
     });
 
     child.stderr?.on('data', (data) => {
-      console.error(`[Roadmap stderr] ${projectId}:`, data.toString());
+      const errOutput = data.toString();
+      console.error(`[Roadmap stderr] ${projectId}:`, errOutput);
+      broadcast('roadmap:progress', { projectId, status: { error: errOutput } });
     });
 
     child.on('close', (code) => {
