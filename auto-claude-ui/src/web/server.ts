@@ -1816,9 +1816,13 @@ app.post('/api/roadmap/generate', (req, res) => {
   }
 
   // Find Python and roadmap script
-  const autoBuildPath = path.join(__dirname, '../../..', 'auto-claude');
+  const autoBuildPath = getAutoBuildPath();
+  if (!autoBuildPath) {
+    broadcast('roadmap:error', { projectId, error: 'Auto-Claude not installed' });
+    return res.json({ success: true, data: { started: false } });
+  }
   const pythonPath = path.join(autoBuildPath, '.venv/bin/python');
-  const roadmapScript = path.join(autoBuildPath, 'roadmap_runner.py');
+  const roadmapScript = path.join(autoBuildPath, 'runners', 'roadmap_runner.py');
 
   if (!existsSync(pythonPath) || !existsSync(roadmapScript)) {
     broadcast('roadmap:error', { projectId, error: 'Auto-Claude not installed or roadmap script not found' });
