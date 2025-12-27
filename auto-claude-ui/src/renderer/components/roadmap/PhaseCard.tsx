@@ -1,10 +1,13 @@
-import { CheckCircle2, Circle, ExternalLink, Play, TrendingUp } from 'lucide-react';
+import { useState } from 'react';
+import { CheckCircle2, ChevronDown, ChevronUp, Circle, ExternalLink, Play, TrendingUp } from 'lucide-react';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { Card } from '../ui/card';
 import { Progress } from '../ui/progress';
 import { ROADMAP_PRIORITY_COLORS } from '../../../shared/constants';
 import type { PhaseCardProps } from './types';
+
+const INITIAL_FEATURE_COUNT = 5;
 
 export function PhaseCard({
   phase,
@@ -14,8 +17,11 @@ export function PhaseCard({
   onConvertToSpec,
   onGoToTask,
 }: PhaseCardProps) {
+  const [isExpanded, setIsExpanded] = useState(false);
   const completedCount = features.filter((f) => f.status === 'done').length;
   const progress = features.length > 0 ? (completedCount / features.length) * 100 : 0;
+  const displayedFeatures = isExpanded ? features : features.slice(0, INITIAL_FEATURE_COUNT);
+  const hasMore = features.length > INITIAL_FEATURE_COUNT;
 
   return (
     <Card className="p-4">
@@ -86,7 +92,7 @@ export function PhaseCard({
       <div>
         <h4 className="text-sm font-medium mb-2">Features ({features.length})</h4>
         <div className="grid gap-2">
-          {features.slice(0, 5).map((feature) => (
+          {displayedFeatures.map((feature) => (
             <div
               key={feature.id}
               className="flex items-start justify-between p-2 rounded-md bg-muted/50 hover:bg-muted cursor-pointer transition-colors"
@@ -110,7 +116,7 @@ export function PhaseCard({
                 )}
               </div>
               {feature.status === 'done' ? (
-                <CheckCircle2 className="h-4 w-4 text-success flex-shrink-0" />
+                <CheckCircle2 className="h-4 w-4 text-success flex-shrink-0 mt-1" />
               ) : feature.linkedSpecId ? (
                 <Button
                   variant="ghost"
@@ -140,10 +146,25 @@ export function PhaseCard({
               )}
             </div>
           ))}
-          {features.length > 5 && (
-            <div className="text-sm text-muted-foreground text-center py-1">
-              +{features.length - 5} more features
-            </div>
+          {hasMore && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="w-full text-muted-foreground hover:text-foreground"
+              onClick={() => setIsExpanded(!isExpanded)}
+            >
+              {isExpanded ? (
+                <>
+                  <ChevronUp className="h-4 w-4 mr-1" />
+                  Show less
+                </>
+              ) : (
+                <>
+                  <ChevronDown className="h-4 w-4 mr-1" />
+                  Show {features.length - INITIAL_FEATURE_COUNT} more
+                </>
+              )}
+            </Button>
           )}
         </div>
       </div>
