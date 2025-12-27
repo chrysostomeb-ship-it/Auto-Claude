@@ -1749,6 +1749,26 @@ app.post('/api/tasks/:id/recover', (req, res) => {
 
 // ============ Roadmap ============
 
+// Transform roadmap from Python snake_case to TypeScript camelCase
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function transformRoadmapForFrontend(roadmap: any): any {
+  if (!roadmap) return roadmap;
+
+  // Transform features: phase_id -> phaseId, etc.
+  if (roadmap.features && Array.isArray(roadmap.features)) {
+    roadmap.features = roadmap.features.map((feature: Record<string, unknown>) => ({
+      ...feature,
+      phaseId: feature.phase_id || feature.phaseId,
+      linkedSpecId: feature.linked_spec_id || feature.linkedSpecId,
+      acceptanceCriteria: feature.acceptance_criteria || feature.acceptanceCriteria,
+      userStories: feature.user_stories || feature.userStories,
+      competitorInsightIds: feature.competitor_insight_ids || feature.competitorInsightIds,
+    }));
+  }
+
+  return roadmap;
+}
+
 app.get('/api/roadmap', (req, res) => {
   const { projectId } = req.query;
   const store = loadStore();
@@ -1763,7 +1783,7 @@ app.get('/api/roadmap', (req, res) => {
   if (existsSync(roadmapPath)) {
     try {
       const roadmap = JSON.parse(readFileSync(roadmapPath, 'utf-8'));
-      res.json({ success: true, data: roadmap });
+      res.json({ success: true, data: transformRoadmapForFrontend(roadmap) });
     } catch {
       res.json({ success: true, data: null });
     }
@@ -1893,7 +1913,7 @@ app.post('/api/roadmap/generate', (req, res) => {
         if (existsSync(roadmapPath)) {
           try {
             const roadmap = JSON.parse(readFileSync(roadmapPath, 'utf-8'));
-            broadcast('roadmap:complete', { projectId, roadmap });
+            broadcast('roadmap:complete', { projectId, roadmap: transformRoadmapForFrontend(roadmap) });
           } catch {
             broadcast('roadmap:error', { projectId, error: 'Failed to parse generated roadmap' });
           }

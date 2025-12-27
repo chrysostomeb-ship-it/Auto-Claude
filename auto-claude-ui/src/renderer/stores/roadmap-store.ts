@@ -376,7 +376,7 @@ export function getFeaturesByPhase(
   roadmap: Roadmap | null,
   phaseId: string
 ): RoadmapFeature[] {
-  if (!roadmap) return [];
+  if (!roadmap || !roadmap.features) return [];
   return roadmap.features.filter((f) => f.phaseId === phaseId);
 }
 
@@ -384,7 +384,7 @@ export function getFeaturesByPriority(
   roadmap: Roadmap | null,
   priority: string
 ): RoadmapFeature[] {
-  if (!roadmap) return [];
+  if (!roadmap || !roadmap.features) return [];
   return roadmap.features.filter((f) => f.priority === priority);
 }
 
