@@ -14,6 +14,16 @@ import type {
  * - Adds default source for features without one
  */
 function migrateRoadmapIfNeeded(roadmap: Roadmap): Roadmap {
+  // Guard against undefined/null features array
+  if (!roadmap.features || !Array.isArray(roadmap.features)) {
+    console.warn('[Roadmap] Migration skipped: no features array');
+    return {
+      ...roadmap,
+      features: roadmap.features || [],
+      phases: roadmap.phases || []
+    };
+  }
+
   let needsMigration = false;
 
   const migratedFeatures = roadmap.features.map((feature) => {

@@ -156,7 +156,7 @@ export function Roadmap({ projectId, onGoToTask }: RoadmapProps) {
 
       {/* Add Feature Dialog */}
       <AddFeatureDialog
-        phases={roadmap.phases}
+        phases={roadmap.phases || []}
         open={showAddFeatureDialog}
         onOpenChange={setShowAddFeatureDialog}
       />

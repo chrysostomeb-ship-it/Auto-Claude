@@ -48,7 +48,7 @@ export function RoadmapTabs({
       {/* Phases View */}
       <TabsContent value="phases" className="flex-1 overflow-auto p-4">
         <div className="space-y-6">
-          {roadmap.phases.map((phase: RoadmapPhase, index: number) => (
+          {(roadmap.phases || []).map((phase: RoadmapPhase, index: number) => (
             <PhaseCard
               key={phase.id}
               phase={phase}
@@ -65,7 +65,7 @@ export function RoadmapTabs({
       {/* All Features View */}
       <TabsContent value="features" className="flex-1 overflow-auto p-4">
         <div className="grid gap-3">
-          {roadmap.features.map((feature: RoadmapFeature) => (
+          {(roadmap.features || []).map((feature: RoadmapFeature) => (
             <FeatureCard
               key={feature.id}
               feature={feature}
@@ -82,7 +82,7 @@ export function RoadmapTabs({
       <TabsContent value="priorities" className="flex-1 overflow-auto p-4">
         <div className="grid grid-cols-2 gap-4">
           {['must', 'should', 'could', 'wont'].map((priority: string) => {
-            const features = roadmap.features.filter((f: RoadmapFeature) => f.priority === priority);
+            const features = (roadmap.features || []).filter((f: RoadmapFeature) => f.priority === priority);
             return (
               <Card key={priority} className="p-4">
                 <div className="flex items-center gap-2 mb-3">

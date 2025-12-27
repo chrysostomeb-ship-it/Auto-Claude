@@ -103,7 +103,7 @@ export function RoadmapHeader({ roadmap, competitorAnalysis, onAddFeature, onRef
         </div>
         <div className="flex items-center gap-2">
           <span className="text-sm">
-            <span className="font-semibold">{roadmap.phases.length}</span>
+            <span className="font-semibold">{(roadmap.phases || []).length}</span>
             <span className="text-muted-foreground"> phases</span>
           </span>
         </div>

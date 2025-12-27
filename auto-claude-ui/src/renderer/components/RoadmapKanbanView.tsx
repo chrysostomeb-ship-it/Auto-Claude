@@ -193,21 +193,22 @@ export function RoadmapKanbanView({
     })
   );
 
-  // Get features grouped by status
+  // Get features grouped by status (with null safety)
+  const features = roadmap.features || [];
   const featuresByStatus = useMemo(() => {
     const grouped: Record<string, RoadmapFeature[]> = {};
     ROADMAP_STATUS_COLUMNS.forEach((column) => {
-      grouped[column.id] = roadmap.features.filter((f) => f.status === column.id);
+      grouped[column.id] = features.filter((f) => f.status === column.id);
     });
     return grouped;
-  }, [roadmap.features]);
+  }, [features]);
 
   // Get all status IDs for detecting column drops
   const statusIds = useMemo(() => ROADMAP_STATUS_COLUMNS.map((c) => c.id), []);
 
   const handleDragStart = (event: DragStartEvent) => {
     const { active } = event;
-    const feature = roadmap.features.find((f) => f.id === active.id);
+    const feature = features.find((f) => f.id === active.id);
     if (feature) {
       setActiveFeature(feature);
     }
@@ -230,7 +231,7 @@ export function RoadmapKanbanView({
     }
 
     // Check if over a feature - get its status
-    const overFeature = roadmap.features.find((f) => f.id === overId);
+    const overFeature = features.find((f) => f.id === overId);
     if (overFeature) {
       setOverColumnId(overFeature.status);
     }
@@ -245,7 +246,7 @@ export function RoadmapKanbanView({
 
     const activeFeatureId = active.id as string;
     const overId = over.id as string;
-    const draggedFeature = roadmap.features.find((f) => f.id === activeFeatureId);
+    const draggedFeature = features.find((f) => f.id === activeFeatureId);
 
     if (!draggedFeature) return;
 
@@ -257,7 +258,7 @@ export function RoadmapKanbanView({
       targetStatus = overId as RoadmapFeatureStatus;
     } else {
       // Dropped on a feature - get its status
-      const overFeature = roadmap.features.find((f) => f.id === overId);
+      const overFeature = features.find((f) => f.id === overId);
       if (!overFeature) return;
       targetStatus = overFeature.status;
     }
