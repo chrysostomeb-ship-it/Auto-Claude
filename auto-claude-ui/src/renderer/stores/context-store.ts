@@ -107,11 +107,12 @@ export async function loadProjectContext(projectId: string): Promise<void> {
 
   try {
     const result = await window.electronAPI.getProjectContext(projectId);
-    if (result.success && result.data) {
-      store.setProjectIndex(result.data.projectIndex);
-      store.setMemoryStatus(result.data.memoryStatus);
-      store.setMemoryState(result.data.memoryState);
-      store.setRecentMemories(result.data.recentMemories || []);
+    if (result.success) {
+      // data.projectIndex can be null if no index exists yet - that's OK
+      store.setProjectIndex(result.data?.projectIndex ?? null);
+      store.setMemoryStatus(result.data?.memoryStatus ?? null);
+      store.setMemoryState(result.data?.memoryState ?? null);
+      store.setRecentMemories(result.data?.recentMemories || []);
     } else {
       store.setIndexError(result.error || 'Failed to load project context');
     }
@@ -133,8 +134,9 @@ export async function refreshProjectIndex(projectId: string): Promise<void> {
 
   try {
     const result = await window.electronAPI.refreshProjectIndex(projectId);
-    if (result.success && result.data) {
-      store.setProjectIndex(result.data);
+    if (result.success) {
+      // data can be null if no index exists - that's OK, show "No index" UI
+      store.setProjectIndex(result.data ?? null);
     } else {
       store.setIndexError(result.error || 'Failed to refresh project index');
     }

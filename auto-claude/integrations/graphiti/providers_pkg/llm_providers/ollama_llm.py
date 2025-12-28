@@ -27,6 +27,8 @@ def create_ollama_llm_client(config: "GraphitiConfig") -> Any:
         ProviderNotInstalled: If graphiti-core is not installed
         ProviderError: If model is not specified
     """
+    import os
+
     try:
         from graphiti_core.llm_client.config import LLMConfig
         from graphiti_core.llm_client.openai_generic_client import OpenAIGenericClient
@@ -40,13 +42,17 @@ def create_ollama_llm_client(config: "GraphitiConfig") -> Any:
     if not config.ollama_llm_model:
         raise ProviderError("Ollama provider requires OLLAMA_LLM_MODEL")
 
-    # Ensure Ollama base URL ends with /v1 for OpenAI compatibility
-    base_url = config.ollama_base_url
+    # Support separate base URL for LLM (e.g., Z.AI proxy)
+    # Priority: GRAPHITI_LLM_BASE_URL > OLLAMA_BASE_URL
+    base_url = os.environ.get("GRAPHITI_LLM_BASE_URL", config.ollama_base_url)
     if not base_url.endswith("/v1"):
         base_url = base_url.rstrip("/") + "/v1"
 
+    # Get API key from env (for proxies like Z.AI that need auth)
+    api_key = os.environ.get("GRAPHITI_LLM_API_KEY", "ollama")
+
     llm_config = LLMConfig(
-        api_key="ollama",  # Ollama requires a dummy API key
+        api_key=api_key,
         model=config.ollama_llm_model,
         small_model=config.ollama_llm_model,
         base_url=base_url,

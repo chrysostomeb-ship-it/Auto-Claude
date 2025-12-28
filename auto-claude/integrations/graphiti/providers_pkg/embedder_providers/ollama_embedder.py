@@ -14,6 +14,7 @@ Supported models with known dimensions:
 - bge-large (1024) - BAAI general embedding large
 """
 
+import os
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -43,6 +44,8 @@ KNOWN_OLLAMA_EMBEDDING_MODELS: dict[str, int] = {
     "bge-m3:latest": 1024,
     "all-minilm": 384,
     "all-minilm:latest": 384,
+    # Jina embeddings (for vLLM)
+    "jinaai/jina-embeddings-v3": 1024,
 }
 
 
@@ -112,8 +115,9 @@ def create_ollama_embedder(config: "GraphitiConfig") -> Any:
         config.ollama_embedding_dim,
     )
 
-    # Ensure Ollama base URL ends with /v1 for OpenAI compatibility
-    base_url = config.ollama_base_url
+    # Support separate base URL for embedder (e.g., local vLLM)
+    # Priority: GRAPHITI_EMBEDDER_BASE_URL > OLLAMA_BASE_URL
+    base_url = os.environ.get("GRAPHITI_EMBEDDER_BASE_URL", config.ollama_base_url)
     if not base_url.endswith("/v1"):
         base_url = base_url.rstrip("/") + "/v1"
 

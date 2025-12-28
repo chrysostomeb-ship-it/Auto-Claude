@@ -31,9 +31,9 @@ from graphiti_config import (
     is_graphiti_enabled,
 )
 
-# Re-export from modular system (queries_pkg)
-from .queries_pkg.graphiti import GraphitiMemory
-from .queries_pkg.schema import (
+# Re-export from modular system
+# Use relative import within the integrations.graphiti package
+from .queries_pkg import (
     EPISODE_TYPE_CODEBASE_DISCOVERY,
     EPISODE_TYPE_GOTCHA,
     EPISODE_TYPE_HISTORICAL_CONTEXT,
@@ -42,6 +42,7 @@ from .queries_pkg.schema import (
     EPISODE_TYPE_SESSION_INSIGHT,
     EPISODE_TYPE_TASK_OUTCOME,
     MAX_CONTEXT_RESULTS,
+    GraphitiMemory,
     GroupIdMode,
 )
 
@@ -49,135 +50,37 @@ from .queries_pkg.schema import (
 # Convenience function for getting a memory manager
 def get_graphiti_memory(
     spec_dir: Path,
-    project_dir: Path,
-    group_id_mode: str = GroupIdMode.SPEC,
-) -> GraphitiMemory:
+    project_dir: Path | None = None,
+) -> GraphitiMemory | None:
     """
-    Get a GraphitiMemory instance for the given spec.
-
-    This is the main entry point for other modules.
+    Get a GraphitiMemory instance if available.
 
     Args:
-        spec_dir: Spec directory
-        project_dir: Project root directory
-        group_id_mode: "spec" for isolated memory, "project" for shared
+        spec_dir: Spec directory (used for group_id)
+        project_dir: Project root directory (defaults to spec_dir.parent.parent)
 
     Returns:
-        GraphitiMemory instance
+        GraphitiMemory instance or None if not available
     """
-    return GraphitiMemory(spec_dir, project_dir, group_id_mode)
+    if not is_graphiti_enabled():
+        return None
+
+    if project_dir is None:
+        project_dir = spec_dir.parent.parent
+
+    return GraphitiMemory(spec_dir, project_dir)
 
 
-async def test_graphiti_connection() -> tuple[bool, str]:
-    """
-    Test if FalkorDB is available and Graphiti can connect.
-
-    Returns:
-        Tuple of (success: bool, message: str)
-    """
-    config = GraphitiConfig.from_env()
-
-    if not config.enabled:
-        return False, "Graphiti not enabled (GRAPHITI_ENABLED not set to true)"
-
-    # Validate provider configuration
-    errors = config.get_validation_errors()
-    if errors:
-        return False, f"Configuration errors: {'; '.join(errors)}"
-
-    try:
-        from graphiti_core import Graphiti
-        from graphiti_core.driver.falkordb_driver import FalkorDriver
-        from graphiti_providers import ProviderError, create_embedder, create_llm_client
-
-        # Create providers
-        try:
-            llm_client = create_llm_client(config)
-            embedder = create_embedder(config)
-        except ProviderError as e:
-            return False, f"Provider error: {e}"
-
-        # Try to connect
-        driver = FalkorDriver(
-            host=config.falkordb_host,
-            port=config.falkordb_port,
-            password=config.falkordb_password or None,
-            database=config.database,
-        )
-
-        graphiti = Graphiti(
-            graph_driver=driver,
-            llm_client=llm_client,
-            embedder=embedder,
-        )
-
-        # Try a simple operation
-        await graphiti.build_indices_and_constraints()
-        await graphiti.close()
-
-        return True, (
-            f"Connected to FalkorDB at {config.falkordb_host}:{config.falkordb_port} "
-            f"(providers: {config.get_provider_summary()})"
-        )
-
-    except ImportError as e:
-        return False, f"Graphiti packages not installed: {e}"
-
-    except Exception as e:
-        return False, f"Connection failed: {e}"
-
-
-async def test_provider_configuration() -> dict:
-    """
-    Test the current provider configuration and return detailed status.
-
-    Returns:
-        Dict with test results for each component
-    """
-    from graphiti_providers import (
-        test_embedder_connection,
-        test_llm_connection,
-        test_ollama_connection,
-    )
-
-    config = GraphitiConfig.from_env()
-
-    results = {
-        "config_valid": config.is_valid(),
-        "validation_errors": config.get_validation_errors(),
-        "llm_provider": config.llm_provider,
-        "embedder_provider": config.embedder_provider,
-        "llm_test": None,
-        "embedder_test": None,
-    }
-
-    # Test LLM
-    llm_success, llm_msg = await test_llm_connection(config)
-    results["llm_test"] = {"success": llm_success, "message": llm_msg}
-
-    # Test embedder
-    emb_success, emb_msg = await test_embedder_connection(config)
-    results["embedder_test"] = {"success": emb_success, "message": emb_msg}
-
-    # Extra test for Ollama
-    if config.llm_provider == "ollama" or config.embedder_provider == "ollama":
-        ollama_success, ollama_msg = await test_ollama_connection(
-            config.ollama_base_url
-        )
-        results["ollama_test"] = {"success": ollama_success, "message": ollama_msg}
-
-    return results
-
-
-# Re-export all public APIs for backward compatibility
+# Public API exports
 __all__ = [
+    # Config
+    "GraphitiConfig",
+    "is_graphiti_enabled",
+    # Memory
     "GraphitiMemory",
     "GroupIdMode",
     "get_graphiti_memory",
-    "is_graphiti_enabled",
-    "test_graphiti_connection",
-    "test_provider_configuration",
-    "MAX_CONTEXT_RESULTS",
+    # Episode types
     "EPISODE_TYPE_SESSION_INSIGHT",
     "EPISODE_TYPE_CODEBASE_DISCOVERY",
     "EPISODE_TYPE_PATTERN",
@@ -185,4 +88,6 @@ __all__ = [
     "EPISODE_TYPE_TASK_OUTCOME",
     "EPISODE_TYPE_QA_RESULT",
     "EPISODE_TYPE_HISTORICAL_CONTEXT",
+    # Constants
+    "MAX_CONTEXT_RESULTS",
 ]

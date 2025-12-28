@@ -554,6 +554,9 @@ export const webAPI: ElectronAPI = {
   // ElectronAPI: archiveIdea(projectId: string, ideaId: string)
   archiveIdea: (projectId: string, ideaId: string) =>
     request('POST', `/ideation/ideas/${ideaId}/archive?projectId=${projectId}`),
+  // ElectronAPI: unarchiveIdea(projectId: string, ideaId: string)
+  unarchiveIdea: (projectId: string, ideaId: string) =>
+    request('POST', `/ideation/ideas/${ideaId}/unarchive?projectId=${projectId}`),
   // ElectronAPI: deleteIdea(projectId: string, ideaId: string)
   deleteIdea: (projectId: string, ideaId: string) =>
     request('DELETE', `/ideation/ideas/${ideaId}?projectId=${projectId}`),

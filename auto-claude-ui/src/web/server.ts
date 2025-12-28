@@ -416,37 +416,58 @@ function extractSessionNumber(name: string): number | undefined {
 
 function loadFileBasedMemories(projectPath: string, limit: number): MemoryEpisode[] {
   const memories: MemoryEpisode[] = [];
-  const specsDir = path.join(projectPath, '.auto-claude', 'specs');
 
+  // Collect all memory directories from both main project and worktrees
+  const memoryDirs: { specDir: string; memoryDir: string }[] = [];
+
+  // 1. Check main project specs
+  const specsDir = path.join(projectPath, '.auto-claude', 'specs');
   console.log(`[Memory] Loading file-based memories from: ${specsDir}`);
 
-  if (!existsSync(specsDir)) {
-    console.log('[Memory] Specs directory does not exist');
-    return memories;
+  if (existsSync(specsDir)) {
+    try {
+      const specDirs = readdirSync(specsDir)
+        .filter(f => statSync(path.join(specsDir, f)).isDirectory());
+      for (const specDir of specDirs) {
+        const memoryDir = path.join(specsDir, specDir, 'memory');
+        if (existsSync(memoryDir)) {
+          memoryDirs.push({ specDir, memoryDir });
+        }
+      }
+    } catch { /* skip */ }
   }
 
-  try {
-    // Get ALL spec directories
-    const allSpecDirs = readdirSync(specsDir)
-      .filter(f => statSync(path.join(specsDir, f)).isDirectory());
+  // 2. Check worktrees for memories (agents save memories in worktrees during builds)
+  const worktreesDir = path.join(projectPath, '.worktrees');
+  if (existsSync(worktreesDir)) {
+    try {
+      const worktrees = readdirSync(worktreesDir)
+        .filter(f => statSync(path.join(worktreesDir, f)).isDirectory());
+      console.log(`[Memory] Found ${worktrees.length} worktrees to check`);
 
-    console.log(`[Memory] Found ${allSpecDirs.length} total spec directories`);
+      for (const wtName of worktrees) {
+        const wtSpecsDir = path.join(worktreesDir, wtName, '.auto-claude', 'specs');
+        if (existsSync(wtSpecsDir)) {
+          const wtSpecDirs = readdirSync(wtSpecsDir)
+            .filter(f => statSync(path.join(wtSpecsDir, f)).isDirectory());
+          for (const specDir of wtSpecDirs) {
+            const memoryDir = path.join(wtSpecsDir, specDir, 'memory');
+            if (existsSync(memoryDir)) {
+              memoryDirs.push({ specDir: `${wtName}/${specDir}`, memoryDir });
+            }
+          }
+        }
+      }
+    } catch { /* skip */ }
+  }
 
-    // Filter to specs that HAVE memory directories (completed sessions)
-    const specsWithMemory = allSpecDirs.filter(specDir => {
-      const memoryDir = path.join(specsDir, specDir, 'memory');
-      const hasMemory = existsSync(memoryDir);
-      return hasMemory;
-    });
+  console.log(`[Memory] Found ${memoryDirs.length} memory directories total`);
 
-    console.log(`[Memory] Specs with memory directories: ${specsWithMemory.length}`, specsWithMemory.slice(0, 10));
+  // Sort by spec name (descending) and take top 10
+  const sortedMemoryDirs = memoryDirs.sort((a, b) => b.specDir.localeCompare(a.specDir)).slice(0, 10);
 
-    // Sort by spec number (descending) and take top 10 specs with memories
-    const specDirs = specsWithMemory.sort().reverse().slice(0, 10);
-
-    for (const specDir of specDirs) {
-      const memoryDir = path.join(specsDir, specDir, 'memory');
-      console.log(`[Memory] Loading from: ${memoryDir}`);
+  for (const { specDir, memoryDir } of sortedMemoryDirs) {
+    console.log(`[Memory] Loading from: ${memoryDir}`);
 
       // Load session insights
       const sessionInsightsDir = path.join(memoryDir, 'session_insights');
@@ -511,6 +532,7 @@ function startLogWatching(specId: string, projectPath: string): void {
   let lastContent = '';
   let lastWorktreeContent = '';
   let lastPlanStatus = '';
+  let lastPlanHash = '';  // Track plan changes for subtask updates
 
   // Load initial content
   const mainLogFile = path.join(specDir, 'task_logs.json');
@@ -529,12 +551,17 @@ function startLogWatching(specId: string, projectPath: string): void {
     } catch {}
   }
 
-  // Load initial plan status
+  // Load initial plan status and hash
   const planFile = existsSync(worktreePlanFile) ? worktreePlanFile : mainPlanFile;
   if (existsSync(planFile)) {
     try {
       const plan = JSON.parse(readFileSync(planFile, 'utf-8'));
       lastPlanStatus = plan.status || '';
+      // Initialize hash of subtask statuses
+      const subtaskStatuses = (plan.phases || []).flatMap((phase: { subtasks?: { subtask_id: string; status: string }[] }) =>
+        (phase.subtasks || []).map((s: { subtask_id: string; status: string }) => `${s.subtask_id}:${s.status}`)
+      ).join('|');
+      lastPlanHash = `${lastPlanStatus}|${subtaskStatuses}`;
     } catch {}
   }
 
@@ -571,12 +598,28 @@ function startLogWatching(specId: string, projectPath: string): void {
       broadcast('task:logsChanged', { specId, logs: newLogs });
     }
 
-    // Check for plan status changes (ai_review, human_review, etc.)
+    // Check for plan changes (status and subtasks)
     const currentPlanFile = existsSync(worktreePlanFile) ? worktreePlanFile : mainPlanFile;
     if (existsSync(currentPlanFile)) {
       try {
-        const plan = JSON.parse(readFileSync(currentPlanFile, 'utf-8'));
+        const planContent = readFileSync(currentPlanFile, 'utf-8');
+        const plan = JSON.parse(planContent);
         const currentStatus = plan.status || '';
+
+        // Create a hash of subtask statuses to detect changes
+        const subtaskStatuses = (plan.phases || []).flatMap((phase: { subtasks?: { subtask_id: string; status: string }[] }) =>
+          (phase.subtasks || []).map((s: { subtask_id: string; status: string }) => `${s.subtask_id}:${s.status}`)
+        ).join('|');
+        const currentHash = `${currentStatus}|${subtaskStatuses}`;
+
+        // Broadcast task:progress when plan content changes (subtasks updated)
+        if (currentHash !== lastPlanHash) {
+          console.log(`[LogWatcher] Plan changed for ${specId}, broadcasting task:progress`);
+          lastPlanHash = currentHash;
+          broadcast('task:progress', { taskId: specId, plan });
+        }
+
+        // Also broadcast status change if status specifically changed
         if (currentStatus && currentStatus !== lastPlanStatus) {
           console.log(`[LogWatcher] Status changed for ${specId}: ${lastPlanStatus} -> ${currentStatus}`);
           lastPlanStatus = currentStatus;
@@ -872,6 +915,11 @@ app.get('/api/tasks', (req, res) => {
         try {
           const plan = JSON.parse(readFileSync(planPath, 'utf-8'));
 
+          // Read status from plan first (for newly created tasks without subtasks)
+          if (plan.status) {
+            status = plan.status;
+          }
+
           // Extract subtasks from phases (like Electron app does)
           // Handle both 'subtasks' and 'chunks' naming conventions
           if (plan.phases && Array.isArray(plan.phases)) {
@@ -888,6 +936,7 @@ app.get('/api/tasks', (req, res) => {
           }
 
           // Calculate status based on subtask progress (like Electron app)
+          // This overrides plan.status if there are subtasks
           const allSubtasks = subtasks as Array<{ status: string }>;
           if (allSubtasks.length > 0) {
             const completed = allSubtasks.filter((s) => s.status === 'completed').length;
@@ -1300,6 +1349,193 @@ app.post('/api/tasks/:id/review', (req, res) => {
 
     res.json({ success: true });
   }
+});
+
+// QA Review: Approve task
+app.post('/api/tasks/:id/review/approve', (req, res) => {
+  const taskId = req.params.id;
+  const { projectId } = req.body;
+
+  const store = loadStore();
+  const project = store.projects.find((p) => p.id === projectId);
+
+  if (!project) {
+    return res.status(404).json({ success: false, error: 'Project not found' });
+  }
+
+  const specDir = path.join(project.path, '.auto-claude', 'specs', taskId);
+
+  // Write approval to QA report
+  const qaReportPath = path.join(specDir, 'qa_report.md');
+  writeFileSync(
+    qaReportPath,
+    `# QA Review\n\nStatus: APPROVED\n\nReviewed at: ${new Date().toISOString()}\n`
+  );
+
+  // Update plan status to done
+  const planPath = path.join(specDir, 'implementation_plan.json');
+  if (existsSync(planPath)) {
+    try {
+      const plan = JSON.parse(readFileSync(planPath, 'utf-8'));
+      plan.status = 'human_review';
+      plan.qa_signoff = { status: 'approved', timestamp: new Date().toISOString() };
+      writeFileSync(planPath, JSON.stringify(plan, null, 2));
+    } catch (err) {
+      console.error('[Review Approve] Error updating plan:', err);
+    }
+  }
+
+  broadcast('task:statusChange', { taskId, status: 'human_review' });
+  broadcast('task:reviewApproved', { taskId });
+  res.json({ success: true });
+});
+
+// QA Review: Reject task with feedback
+app.post('/api/tasks/:id/review/reject', (req, res) => {
+  const taskId = req.params.id;
+  const { projectId, feedback } = req.body;
+
+  const store = loadStore();
+  const project = store.projects.find((p) => p.id === projectId);
+
+  if (!project) {
+    return res.status(404).json({ success: false, error: 'Project not found' });
+  }
+
+  const specDir = path.join(project.path, '.auto-claude', 'specs', taskId);
+  const worktreePath = path.join(project.path, '.worktrees', taskId);
+  const worktreeSpecDir = path.join(worktreePath, '.auto-claude', 'specs', taskId);
+  const hasWorktree = existsSync(worktreePath);
+
+  // Write feedback for QA fixer - write to WORKTREE spec dir if it exists
+  const targetSpecDir = hasWorktree ? worktreeSpecDir : specDir;
+  const fixRequestPath = path.join(targetSpecDir, 'QA_FIX_REQUEST.md');
+
+  console.log('[Review Reject] Writing QA fix request to:', fixRequestPath);
+  writeFileSync(
+    fixRequestPath,
+    `# QA Fix Request\n\nStatus: REJECTED\n\n## Feedback\n\n${feedback || 'No feedback provided'}\n\nCreated at: ${new Date().toISOString()}\n`
+  );
+
+  // Also write to main spec dir for visibility
+  if (hasWorktree) {
+    const mainFixRequestPath = path.join(specDir, 'QA_FIX_REQUEST.md');
+    writeFileSync(mainFixRequestPath, readFileSync(fixRequestPath, 'utf-8'));
+  }
+
+  // Update plan status back to in_progress
+  const planPath = path.join(hasWorktree ? worktreeSpecDir : specDir, 'implementation_plan.json');
+  if (existsSync(planPath)) {
+    try {
+      const plan = JSON.parse(readFileSync(planPath, 'utf-8'));
+      plan.status = 'in_progress';
+      plan.qa_signoff = { status: 'rejected', feedback, timestamp: new Date().toISOString() };
+      writeFileSync(planPath, JSON.stringify(plan, null, 2));
+    } catch (err) {
+      console.error('[Review Reject] Error updating plan:', err);
+    }
+  }
+
+  // Restart the task - use --qa for complete builds, --auto-continue for incomplete
+  const autoBuildPath = getAutoBuildPath();
+  if (autoBuildPath) {
+    const pythonPath = path.join(autoBuildPath, '.venv', 'bin', 'python');
+    const runScript = path.join(autoBuildPath, 'run.py');
+
+    // Kill existing task if running
+    if (runningTasks.has(taskId)) {
+      runningTasks.get(taskId)?.process.kill();
+      runningTasks.delete(taskId);
+    }
+
+    // Check if build is complete by counting subtasks
+    let buildComplete = false;
+    if (existsSync(planPath)) {
+      try {
+        const checkPlan = JSON.parse(readFileSync(planPath, 'utf-8'));
+        const subtasks = checkPlan.subtasks || [];
+        const completedSubtasks = subtasks.filter((st: any) => st.status === 'completed');
+        buildComplete = subtasks.length > 0 && completedSubtasks.length === subtasks.length;
+      } catch {}
+    }
+
+    const args = buildComplete
+      ? [runScript, '--spec', taskId, '--qa']
+      : [runScript, '--spec', taskId, '--auto-continue'];
+
+    console.log('[Review Reject] Restarting task with:', args.join(' '));
+
+    const child = spawn(pythonPath, args, {
+      cwd: project.path,
+      env: { ...process.env, PYTHONUNBUFFERED: '1' }
+    });
+
+    runningTasks.set(taskId, {
+      taskId,
+      process: child,
+      projectPath: project.path
+    });
+
+    startLogWatching(taskId, project.path);
+    broadcast('task:statusChange', { taskId, status: 'in_progress' });
+
+    child.stdout?.on('data', (data) => {
+      const log = data.toString();
+      console.log('[QA Fix stdout]', taskId, log.substring(0, 200));
+      broadcast('task:log', { taskId, log });
+    });
+
+    child.stderr?.on('data', (data) => {
+      const log = data.toString();
+      console.log('[QA Fix stderr]', taskId, log.substring(0, 200));
+      broadcast('task:log', { taskId, log });
+    });
+
+    child.on('exit', (code) => {
+      console.log('[QA Fix exit]', taskId, 'code:', code);
+      runningTasks.delete(taskId);
+      stopLogWatching(taskId);
+      broadcast('task:exit', { taskId, code });
+
+      const finalStatus = 'human_review';
+
+      const exitPlanPath = path.join(hasWorktree ? worktreeSpecDir : specDir, 'implementation_plan.json');
+      if (existsSync(exitPlanPath)) {
+        try {
+          const exitPlan = JSON.parse(readFileSync(exitPlanPath, 'utf-8'));
+          exitPlan.status = finalStatus;
+          writeFileSync(exitPlanPath, JSON.stringify(exitPlan, null, 2));
+        } catch {}
+      }
+
+      broadcast('task:statusChange', { taskId, status: finalStatus });
+    });
+  }
+
+  broadcast('task:reviewRejected', { taskId, feedback });
+  res.json({ success: true });
+});
+
+// Get QA Report for a task
+app.get('/api/tasks/:id/qa-report', (req, res) => {
+  const taskId = req.params.id;
+  const { projectId } = req.query;
+
+  const store = loadStore();
+  const project = store.projects.find((p) => p.id === projectId);
+
+  if (!project) {
+    return res.status(404).json({ success: false, error: 'Project not found' });
+  }
+
+  const qaReportPath = path.join(project.path, '.auto-claude', 'specs', taskId, 'qa_report.md');
+
+  if (!existsSync(qaReportPath)) {
+    return res.status(404).json({ success: false, error: 'QA report not found' });
+  }
+
+  const qaReport = readFileSync(qaReportPath, 'utf-8');
+  res.json({ success: true, data: { taskId, qaReport } });
 });
 
 // Archive task
@@ -3477,8 +3713,8 @@ app.get('/api/context/memory-status', (req, res) => {
   });
 });
 
-// Refresh project index
-app.post('/api/context/refresh', (req, res) => {
+// Refresh project index - runs Python analyzer
+app.post('/api/context/refresh', async (req, res) => {
   const { projectId } = req.query;
   const store = loadStore();
   const project = store.projects.find((p) => p.id === projectId);
@@ -3487,17 +3723,78 @@ app.post('/api/context/refresh', (req, res) => {
     return res.status(404).json({ success: false, error: 'Project not found' });
   }
 
-  // In web mode, we return the existing index - full refresh would require running Python
-  const indexPath = path.join(project.path, '.auto-claude', 'project_index.json');
-  if (existsSync(indexPath)) {
-    try {
-      const index = JSON.parse(readFileSync(indexPath, 'utf-8'));
-      res.json({ success: true, data: index });
-    } catch {
-      res.json({ success: true, data: null });
+  try {
+    // Find the auto-claude source directory (where analyzer.py lives)
+    const possiblePaths = [
+      path.join(__dirname, '..', '..', 'auto-claude'),  // Development
+      path.join(process.cwd(), 'auto-claude'),         // From project root
+      '/home/devuser/workdir/Auto-Claude/auto-claude'  // Fallback
+    ];
+
+    let autoBuildSource: string | null = null;
+    for (const p of possiblePaths) {
+      const analyzerPath = path.join(p, 'analyzer.py');
+      if (existsSync(analyzerPath)) {
+        autoBuildSource = p;
+        break;
+      }
     }
-  } else {
-    res.json({ success: true, data: null });
+
+    if (!autoBuildSource) {
+      return res.status(500).json({
+        success: false,
+        error: 'Auto-build source path not found (analyzer.py not located)'
+      });
+    }
+
+    const analyzerPath = path.join(autoBuildSource, 'analyzer.py');
+    const indexOutputPath = path.join(project.path, '.auto-claude', 'project_index.json');
+
+    // Ensure .auto-claude directory exists
+    const autoclaudeDir = path.join(project.path, '.auto-claude');
+    if (!existsSync(autoclaudeDir)) {
+      mkdirSync(autoclaudeDir, { recursive: true });
+    }
+
+    // Run analyzer (use python3 as python may not exist on some systems)
+    const pythonCmd = existsSync('/usr/bin/python3') ? 'python3' : 'python';
+    await new Promise<void>((resolve, reject) => {
+      const proc = spawn(pythonCmd, [
+        analyzerPath,
+        '--project-dir', project.path,
+        '--output', indexOutputPath
+      ], {
+        cwd: project.path,
+        env: { ...process.env }
+      });
+
+      let stderr = '';
+      proc.stderr?.on('data', (data) => { stderr += data.toString(); });
+
+      proc.on('close', (code: number | null) => {
+        if (code === 0) {
+          resolve();
+        } else {
+          reject(new Error(`Analyzer exited with code ${code}: ${stderr}`));
+        }
+      });
+
+      proc.on('error', reject);
+    });
+
+    // Read the new index
+    if (existsSync(indexOutputPath)) {
+      const index = JSON.parse(readFileSync(indexOutputPath, 'utf-8'));
+      return res.json({ success: true, data: index });
+    }
+
+    return res.status(500).json({ success: false, error: 'Failed to generate project index' });
+  } catch (error) {
+    console.error('[Context] Refresh error:', error);
+    return res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : 'Failed to refresh project index'
+    });
   }
 });
 
@@ -4016,6 +4313,42 @@ app.post('/api/ideation/ideas/:id/archive', (req, res) => {
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ success: false, error: 'Failed to archive idea' });
+  }
+});
+
+// Unarchive idea (restore to active)
+app.post('/api/ideation/ideas/:id/unarchive', (req, res) => {
+  const ideaId = req.params.id;
+  const { projectId } = req.query;
+
+  const store = loadStore();
+  const project = store.projects.find((p) => p.id === projectId);
+
+  if (!project) {
+    return res.status(404).json({ success: false, error: 'Project not found' });
+  }
+
+  const ideationPath = path.join(project.path, '.auto-claude', 'ideation', 'ideation.json');
+  if (!existsSync(ideationPath)) {
+    return res.status(404).json({ success: false, error: 'Ideation not found' });
+  }
+
+  try {
+    const ideation = JSON.parse(readFileSync(ideationPath, 'utf-8'));
+    const idea = ideation.ideas?.find((i: { id: string }) => i.id === ideaId);
+
+    if (!idea) {
+      return res.status(404).json({ success: false, error: 'Idea not found' });
+    }
+
+    idea.status = 'active';
+    idea.linked_task_id = undefined; // Remove task link
+    ideation.updated_at = new Date().toISOString();
+    writeFileSync(ideationPath, JSON.stringify(ideation, null, 2));
+
+    res.json({ success: true, data: idea });
+  } catch (error) {
+    res.status(500).json({ success: false, error: 'Failed to unarchive idea' });
   }
 });
 
@@ -4584,10 +4917,10 @@ app.get('/api/tasks/:id/logs', (req, res) => {
         phases: {
           planning: mainLogs.phases?.planning || worktreeLogs.phases?.planning,
           coding: (worktreeLogs.phases?.coding?.entries?.length > 0 || worktreeLogs.phases?.coding?.status !== 'pending')
-            ? worktreeLogs.phases.coding
+            ? worktreeLogs.phases?.coding
             : mainLogs.phases?.coding,
           validation: (worktreeLogs.phases?.validation?.entries?.length > 0 || worktreeLogs.phases?.validation?.status !== 'pending')
-            ? worktreeLogs.phases.validation
+            ? worktreeLogs.phases?.validation
             : mainLogs.phases?.validation
         }
       };
@@ -4605,10 +4938,32 @@ app.get('/api/tasks/:id/logs', (req, res) => {
         logs.push(content);
       }
     }
-    return res.json({ success: true, data: { raw: logs.join('\n') } });
+    // Return empty structure with proper phases object to prevent frontend crash
+    return res.json({
+      success: true,
+      data: {
+        spec_id: specId,
+        phases: {
+          planning: { status: 'pending', entries: [] },
+          coding: { status: 'pending', entries: [] },
+          validation: { status: 'pending', entries: [] }
+        },
+        raw: logs.join('\n')
+      }
+    });
   }
 
-  res.json({ success: true, data: taskLogs });
+  // Ensure phases object exists with proper structure
+  const safeTaskLogs = {
+    ...taskLogs,
+    phases: {
+      planning: taskLogs.phases?.planning || { status: 'pending', entries: [] },
+      coding: taskLogs.phases?.coding || { status: 'pending', entries: [] },
+      validation: taskLogs.phases?.validation || { status: 'pending', entries: [] }
+    }
+  };
+
+  res.json({ success: true, data: safeTaskLogs });
 });
 
 // ============ Settings ============
@@ -4661,6 +5016,18 @@ app.get('/api/linear/status', (req, res) => {
     data: {
       connected: false,
       message: 'Linear integration requires API token configuration'
+    }
+  });
+});
+
+app.post('/api/linear/import', (req, res) => {
+  // Stubbed - will import Linear issues as Auto Claude tasks
+  const { teamId, projectId, issueIds } = req.body;
+  res.json({
+    success: true,
+    data: {
+      imported: 0,
+      message: 'Linear import not yet implemented'
     }
   });
 });
@@ -4836,6 +5203,42 @@ app.get('/api/github/branches', (req, res) => {
   } catch {
     res.json({ success: true, data: [] });
   }
+});
+
+app.post('/api/github/issues/investigate', (req, res) => {
+  // Stubbed - will investigate GitHub issue with Claude agent
+  const { owner, repo, issueNumber } = req.body;
+  res.json({
+    success: true,
+    data: {
+      investigating: false,
+      message: 'GitHub issue investigation not yet implemented'
+    }
+  });
+});
+
+app.post('/api/github/issues/import', (req, res) => {
+  // Stubbed - will import GitHub issues as Auto Claude tasks
+  const { owner, repo, issueNumbers } = req.body;
+  res.json({
+    success: true,
+    data: {
+      imported: 0,
+      message: 'GitHub issue import not yet implemented'
+    }
+  });
+});
+
+app.post('/api/github/releases', (req, res) => {
+  // Stubbed - will create GitHub release
+  const { owner, repo, tag, name, body } = req.body;
+  res.json({
+    success: true,
+    data: {
+      created: false,
+      message: 'GitHub release creation not yet implemented'
+    }
+  });
 });
 
 // ============ Docker & Infrastructure ============
@@ -5402,6 +5805,34 @@ app.post('/api/env/claude-setup', (req, res) => {
 });
 
 // ============ WebSocket ============
+
+/**
+ * WebSocket Events (broadcasted via the `broadcast()` function):
+ *
+ * TASK EVENTS:
+ * - task:statusChange - Task status changed
+ * - task:log - New log entry for task
+ * - task:exit - Task process exited
+ * - task:logsChanged - Task logs were updated
+ * - task:executionProgress - Task execution progress update
+ *
+ * ROADMAP EVENTS:
+ * - roadmap:progress - Roadmap generation progress
+ * - roadmap:complete - Roadmap generation completed
+ * - roadmap:error - Roadmap generation error
+ *
+ * GITHUB EVENTS (stubbed for future implementation):
+ * - github:issue:created - GitHub issue created
+ * - github:issue:updated - GitHub issue updated
+ * - github:pr:created - GitHub PR created
+ * - github:release:created - GitHub release created
+ *
+ * CLAUDE EVENTS (stubbed for future implementation):
+ * - claude:session:started - Claude agent session started
+ * - claude:session:message - Claude agent message received
+ * - claude:session:completed - Claude agent session completed
+ * - claude:session:error - Claude agent session error
+ */
 
 wss.on('connection', (ws) => {
   console.log('[WebServer] Client connected');
