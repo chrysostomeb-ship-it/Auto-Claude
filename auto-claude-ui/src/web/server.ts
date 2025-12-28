@@ -107,7 +107,7 @@ async function checkDockerAvailable(): Promise<boolean> {
   try {
     await execAsync('docker info', { timeout: 5000 });
     return true;
-  } catch {
+  } catch (_) {
     return false;
   }
 }
@@ -135,11 +135,11 @@ async function checkFalkorDBContainer(): Promise<{ exists: boolean; running: boo
         );
         const match = portOut.match(/:(\d+)/);
         if (match) port = parseInt(match[1], 10);
-      } catch {}
+      } catch (_) {}
     }
 
     return { exists: true, running, port };
-  } catch {
+  } catch (_) {
     return { exists: false, running: false, port: FALKORDB_DEFAULT_PORT };
   }
 }
@@ -176,7 +176,7 @@ async function startFalkorDBContainer(): Promise<boolean> {
           console.log('[FalkorDB] Container ready');
           return true;
         }
-      } catch {}
+      } catch (_) {}
     }
     return false;
   } catch (error) {
@@ -284,7 +284,7 @@ async function listFalkorDBGraphs(): Promise<string[]> {
   }
   try {
     return (await falkordbRedis.call('GRAPH.LIST')) as string[];
-  } catch {
+  } catch (_) {
     return [];
   }
 }
@@ -434,7 +434,7 @@ function loadFileBasedMemories(projectPath: string, limit: number): MemoryEpisod
           memoryDirs.push({ specDir, memoryDir });
         }
       }
-    } catch { /* skip */ }
+    } catch (_e) { /* skip */ }
   }
 
   // 2. Check worktrees for memories (agents save memories in worktrees during builds)
@@ -458,7 +458,7 @@ function loadFileBasedMemories(projectPath: string, limit: number): MemoryEpisod
           }
         }
       }
-    } catch { /* skip */ }
+    } catch (_e) { /* skip */ }
   }
 
   console.log(`[Memory] Found ${memoryDirs.length} memory directories total`);
@@ -468,7 +468,7 @@ function loadFileBasedMemories(projectPath: string, limit: number): MemoryEpisod
 
   for (const { specDir, memoryDir } of sortedMemoryDirs) {
     console.log(`[Memory] Loading from: ${memoryDir}`);
-
+    try {
       // Load session insights
       const sessionInsightsDir = path.join(memoryDir, 'session_insights');
       console.log(`[Memory] Checking session_insights dir: ${sessionInsightsDir}, exists: ${existsSync(sessionInsightsDir)}`);
@@ -497,7 +497,7 @@ function loadFileBasedMemories(projectPath: string, limit: number): MemoryEpisod
                 session_number: sessionData.session_number
               });
             }
-          } catch { /* skip */ }
+          } catch (_e) { /* skip */ }
         }
       }
 
@@ -514,10 +514,10 @@ function loadFileBasedMemories(projectPath: string, limit: number): MemoryEpisod
               content: JSON.stringify(mapData.discovered_files, null, 2),
             });
           }
-        } catch { /* skip */ }
+        } catch (_e) { /* skip */ }
       }
-    }
-  } catch { /* skip */ }
+    } catch (_e) { /* skip */ }
+  }
 
   return memories.slice(0, limit);
 }
@@ -543,12 +543,12 @@ function startLogWatching(specId: string, projectPath: string): void {
   if (existsSync(mainLogFile)) {
     try {
       lastContent = readFileSync(mainLogFile, 'utf-8');
-    } catch {}
+    } catch (_) {}
   }
   if (existsSync(worktreeLogFile)) {
     try {
       lastWorktreeContent = readFileSync(worktreeLogFile, 'utf-8');
-    } catch {}
+    } catch (_) {}
   }
 
   // Load initial plan status and hash
@@ -562,7 +562,7 @@ function startLogWatching(specId: string, projectPath: string): void {
         (phase.subtasks || []).map((s: { subtask_id: string; status: string }) => `${s.subtask_id}:${s.status}`)
       ).join('|');
       lastPlanHash = `${lastPlanStatus}|${subtaskStatuses}`;
-    } catch {}
+    } catch (_) {}
   }
 
   // Poll for changes every second
@@ -579,7 +579,7 @@ function startLogWatching(specId: string, projectPath: string): void {
           changed = true;
           newLogs = JSON.parse(content);
         }
-      } catch {}
+      } catch (_) {}
     }
 
     // Check worktree spec dir
@@ -591,7 +591,7 @@ function startLogWatching(specId: string, projectPath: string): void {
           changed = true;
           newLogs = JSON.parse(content);
         }
-      } catch {}
+      } catch (_) {}
     }
 
     if (changed && newLogs) {
@@ -625,7 +625,7 @@ function startLogWatching(specId: string, projectPath: string): void {
           lastPlanStatus = currentStatus;
           broadcast('task:statusChange', { taskId: specId, status: currentStatus });
         }
-      } catch {}
+      } catch (_) {}
     }
   }, 1000);
 
@@ -670,7 +670,7 @@ function loadJSON<T>(file: string, defaultValue: T): T {
     if (existsSync(file)) {
       return JSON.parse(readFileSync(file, 'utf-8'));
     }
-  } catch {
+  } catch (_) {
     // Ignore
   }
   return defaultValue;
@@ -993,7 +993,7 @@ app.get('/api/tasks', (req, res) => {
           if (!description && plan.description) {
             description = plan.description.slice(0, 200);
           }
-        } catch {
+        } catch (_) {
           // Ignore
         }
       }
@@ -1215,7 +1215,7 @@ app.post('/api/tasks/:id/review', (req, res) => {
         plan.status = 'human_review';
         plan.qa_signoff = { status: 'approved', timestamp: new Date().toISOString() };
         writeFileSync(planPath, JSON.stringify(plan, null, 2));
-      } catch {}
+      } catch (_) {}
     }
 
     broadcast('task:statusChange', { taskId, status: 'human_review' });
@@ -1245,7 +1245,7 @@ app.post('/api/tasks/:id/review', (req, res) => {
         plan.status = 'in_progress';
         plan.qa_signoff = { status: 'rejected', feedback, timestamp: new Date().toISOString() };
         writeFileSync(planPath, JSON.stringify(plan, null, 2));
-      } catch {}
+      } catch (_) {}
     }
 
     // Restart the task - use --qa for complete builds, --auto-continue for incomplete
@@ -1288,7 +1288,7 @@ app.post('/api/tasks/:id/review', (req, res) => {
             writeFileSync(planCheckPath, JSON.stringify(planCheck, null, 2));
             console.log('[Review] Reset in_progress subtasks to pending');
           }
-        } catch {}
+        } catch (_) {}
       }
 
       // Use --qa for complete builds (runs QA fixer), --auto-continue for incomplete (resumes coding)
@@ -1340,7 +1340,7 @@ app.post('/api/tasks/:id/review', (req, res) => {
             const exitPlan = JSON.parse(readFileSync(exitPlanPath, 'utf-8'));
             exitPlan.status = finalStatus;
             writeFileSync(exitPlanPath, JSON.stringify(exitPlan, null, 2));
-          } catch {}
+          } catch (_) {}
         }
 
         broadcast('task:statusChange', { taskId, status: finalStatus });
@@ -1456,7 +1456,7 @@ app.post('/api/tasks/:id/review/reject', (req, res) => {
         const subtasks = checkPlan.subtasks || [];
         const completedSubtasks = subtasks.filter((st: any) => st.status === 'completed');
         buildComplete = subtasks.length > 0 && completedSubtasks.length === subtasks.length;
-      } catch {}
+      } catch (_) {}
     }
 
     const args = buildComplete
@@ -1505,7 +1505,7 @@ app.post('/api/tasks/:id/review/reject', (req, res) => {
           const exitPlan = JSON.parse(readFileSync(exitPlanPath, 'utf-8'));
           exitPlan.status = finalStatus;
           writeFileSync(exitPlanPath, JSON.stringify(exitPlan, null, 2));
-        } catch {}
+        } catch (_) {}
       }
 
       broadcast('task:statusChange', { taskId, status: finalStatus });
@@ -1556,7 +1556,7 @@ app.post('/api/tasks/:id/archive', (req, res) => {
       const plan = JSON.parse(readFileSync(planPath, 'utf-8'));
       plan.archivedAt = new Date().toISOString();
       writeFileSync(planPath, JSON.stringify(plan, null, 2));
-    } catch {
+    } catch (_) {
       // Ignore
     }
   }
@@ -1582,7 +1582,7 @@ app.post('/api/tasks/:id/unarchive', (req, res) => {
       const plan = JSON.parse(readFileSync(planPath, 'utf-8'));
       delete plan.archivedAt;
       writeFileSync(planPath, JSON.stringify(plan, null, 2));
-    } catch {
+    } catch (_) {
       // Ignore
     }
   }
@@ -1627,7 +1627,7 @@ app.get('/api/worktrees', (req, res) => {
       cwd: project.path,
       encoding: 'utf-8'
     }).trim();
-  } catch {
+  } catch (_) {
     baseBranch = 'main';
   }
 
@@ -1653,7 +1653,7 @@ app.get('/api/worktrees', (req, res) => {
           encoding: 'utf-8'
         }).trim();
         commitCount = parseInt(countOutput, 10) || 0;
-      } catch {
+      } catch (_) {
         commitCount = 0;
       }
 
@@ -1675,7 +1675,7 @@ app.get('/api/worktrees', (req, res) => {
         if (filesMatch) filesChanged = parseInt(filesMatch[1], 10) || 0;
         if (addMatch) additions = parseInt(addMatch[1], 10) || 0;
         if (delMatch) deletions = parseInt(delMatch[1], 10) || 0;
-      } catch {
+      } catch (_) {
         // Ignore diff errors
       }
 
@@ -1810,7 +1810,7 @@ app.post('/api/tasks/:id/start', (req, res) => {
           const phaseData = JSON.parse(match[1]);
           broadcast('task:executionProgress', { taskId, progress: { phase: phaseData.phase, status: 'running' } });
         }
-      } catch { /* ignore parse errors */ }
+      } catch (_) { /* ignore parse errors */ }
     }
     if (log.includes('__TASK_LOG_PHASE_END__')) {
       try {
@@ -1819,7 +1819,7 @@ app.post('/api/tasks/:id/start', (req, res) => {
           const phaseData = JSON.parse(match[1]);
           broadcast('task:executionProgress', { taskId, progress: { phase: phaseData.phase, status: phaseData.success ? 'completed' : 'failed' } });
         }
-      } catch { /* ignore parse errors */ }
+      } catch (_) { /* ignore parse errors */ }
     }
   });
 
@@ -1927,7 +1927,7 @@ app.post('/api/tasks/:id/recover', (req, res) => {
       // Always set the status to allow restart
       plan.status = newStatus;
       writeFileSync(planPath, JSON.stringify(plan, null, 2));
-    } catch {
+    } catch (_) {
       // Ignore
     }
   }
@@ -1938,7 +1938,7 @@ app.post('/api/tasks/:id/recover', (req, res) => {
   if (existsSync(reviewStatePath) && options?.clearReviewState) {
     try {
       unlinkSync(reviewStatePath);
-    } catch {
+    } catch (_) {
       // Ignore
     }
   }
@@ -1948,7 +1948,7 @@ app.post('/api/tasks/:id/recover', (req, res) => {
   if (existsSync(qaFixPath)) {
     try {
       unlinkSync(qaFixPath);
-    } catch {
+    } catch (_) {
       // Ignore
     }
   }
@@ -1963,7 +1963,7 @@ app.post('/api/tasks/:id/recover', (req, res) => {
         specs[taskIndex].status = newStatus;
         writeFileSync(specsPath, JSON.stringify(specs, null, 2));
       }
-    } catch {
+    } catch (_) {
       // Ignore
     }
   }
@@ -2020,7 +2020,7 @@ app.get('/api/roadmap', (req, res) => {
     try {
       const roadmap = JSON.parse(readFileSync(roadmapPath, 'utf-8'));
       res.json({ success: true, data: transformRoadmapForFrontend(roadmap) });
-    } catch {
+    } catch (_) {
       res.json({ success: true, data: null });
     }
   } else {
@@ -2124,7 +2124,7 @@ app.post('/api/roadmap/generate', (req, res) => {
             }
             // Ensure phase is always set
             broadcast('roadmap:progress', { projectId, status: { phase: currentPhase, progress: 0, ...status } });
-          } catch {
+          } catch (_) {
             // Not valid JSON, broadcast as message with current phase
             broadcast('roadmap:progress', { projectId, status: { phase: currentPhase, progress: 0, message: line } });
           }
@@ -2150,7 +2150,7 @@ app.post('/api/roadmap/generate', (req, res) => {
           try {
             const roadmap = JSON.parse(readFileSync(roadmapPath, 'utf-8'));
             broadcast('roadmap:complete', { projectId, roadmap: transformRoadmapForFrontend(roadmap) });
-          } catch {
+          } catch (_) {
             broadcast('roadmap:error', { projectId, error: 'Failed to parse generated roadmap' });
           }
         } else {
@@ -2549,12 +2549,12 @@ app.get('/api/terminal/sessions', (req, res) => {
     const sessions = files.map(f => {
       try {
         return JSON.parse(readFileSync(path.join(sessionsDir, f), 'utf-8'));
-      } catch {
+      } catch (_) {
         return null;
       }
     }).filter(Boolean);
     res.json({ success: true, data: sessions });
-  } catch {
+  } catch (_) {
     res.json({ success: true, data: [] });
   }
 });
@@ -2574,7 +2574,7 @@ app.delete('/api/terminal/sessions', (req, res) => {
     try {
       const files = readdirSync(sessionsDir).filter(f => f.endsWith('.json'));
       files.forEach(f => unlinkSync(path.join(sessionsDir, f)));
-    } catch {
+    } catch (_) {
       // Ignore errors
     }
   }
@@ -2600,12 +2600,12 @@ app.get('/api/terminal/sessions/dates', (req, res) => {
         if (session.createdAt) {
           dates.add(session.createdAt.split('T')[0]);
         }
-      } catch {
+      } catch (_) {
         // Ignore
       }
     });
     res.json({ success: true, data: Array.from(dates).sort().reverse() });
-  } catch {
+  } catch (_) {
     res.json({ success: true, data: [] });
   }
 });
@@ -2630,12 +2630,12 @@ app.get('/api/terminal/sessions/date/:date', (req, res) => {
           return session;
         }
         return null;
-      } catch {
+      } catch (_) {
         return null;
       }
     }).filter(Boolean);
     res.json({ success: true, data: sessions });
-  } catch {
+  } catch (_) {
     res.json({ success: true, data: [] });
   }
 });
@@ -2701,7 +2701,7 @@ function loadProfiles(): ProfilesStore {
     if (existsSync(PROFILES_FILE)) {
       return JSON.parse(readFileSync(PROFILES_FILE, 'utf-8'));
     }
-  } catch {}
+  } catch (_) {}
   return defaultProfiles;
 }
 
@@ -2887,7 +2887,7 @@ app.get('/api/projects/:id/version', (req, res) => {
     try {
       const version = JSON.parse(readFileSync(versionFile, 'utf-8'));
       res.json({ success: true, data: version });
-    } catch {
+    } catch (_) {
       res.json({ success: true, data: { version: '2.6.5' } });
     }
   } else if (existsSync(autoClaudeDir)) {
@@ -3077,7 +3077,7 @@ app.get('/api/tasks/:id/worktree/status', (req, res) => {
         if (plan.parent_branch) {
           baseBranch = plan.parent_branch;
         }
-      } catch {}
+      } catch (_) {}
     }
     // Fallback to current branch in main project if no parent_branch
     if (baseBranch === 'main') {
@@ -3086,7 +3086,7 @@ app.get('/api/tasks/:id/worktree/status', (req, res) => {
           cwd: project.path,
           encoding: 'utf-8'
         }).trim();
-      } catch {
+      } catch (_) {
         baseBranch = 'main';
       }
     }
@@ -3099,7 +3099,7 @@ app.get('/api/tasks/:id/worktree/status', (req, res) => {
         encoding: 'utf-8'
       }).trim();
       commitCount = parseInt(countOutput, 10) || 0;
-    } catch {
+    } catch (_) {
       commitCount = 0;
     }
 
@@ -3121,7 +3121,7 @@ app.get('/api/tasks/:id/worktree/status', (req, res) => {
         additions = parseInt(summaryMatch[2], 10) || 0;
         deletions = parseInt(summaryMatch[3], 10) || 0;
       }
-    } catch {
+    } catch (_) {
       // Ignore diff errors
     }
 
@@ -3169,7 +3169,7 @@ app.get('/api/tasks/:id/worktree/diff', (req, res) => {
       if (plan.parent_branch) {
         baseBranch = plan.parent_branch;
       }
-    } catch {}
+    } catch (_) {}
   }
   // Fallback to current branch in main project if no parent_branch
   if (baseBranch === 'main') {
@@ -3178,7 +3178,7 @@ app.get('/api/tasks/:id/worktree/diff', (req, res) => {
         cwd: project.path,
         encoding: 'utf-8'
       }).trim();
-    } catch {
+    } catch (_) {
       baseBranch = 'main';
     }
   }
@@ -3220,7 +3220,7 @@ app.get('/api/tasks/:id/worktree/diff', (req, res) => {
         if (statusOutput.startsWith('A')) status = 'added';
         else if (statusOutput.startsWith('D')) status = 'deleted';
         else if (statusOutput.startsWith('R')) status = 'renamed';
-      } catch {}
+      } catch (_) {}
 
       // Get additions/deletions for this file
       let additions = 0;
@@ -3235,7 +3235,7 @@ app.get('/api/tasks/:id/worktree/diff', (req, res) => {
           additions = numstatMatch[1] === '-' ? 0 : parseInt(numstatMatch[1], 10);
           deletions = numstatMatch[2] === '-' ? 0 : parseInt(numstatMatch[2], 10);
         }
-      } catch {}
+      } catch (_) {}
 
       files.push({
         path: filePath,
@@ -3288,14 +3288,14 @@ app.post('/api/tasks/:id/worktree/merge', (req, res) => {
             baseBranch = plan.parent_branch;
             console.log('[Merge] Using parent_branch from plan:', baseBranch);
           }
-        } catch {}
+        } catch (_) {}
       }
       // Fallback to main/master if no parent_branch stored
       if (!baseBranch) {
         try {
           execSync('git rev-parse --verify main', { cwd: project.path, encoding: 'utf-8', stdio: 'pipe' });
           baseBranch = 'main';
-        } catch {
+        } catch (_) {
           baseBranch = 'master';
         }
       }
@@ -3321,7 +3321,7 @@ app.post('/api/tasks/:id/worktree/merge', (req, res) => {
         stdio: 'pipe'
       }).trim();
       alreadyMerged = unmergedCommits === '';
-    } catch {
+    } catch (_) {
       // Branch might not exist, continue with merge attempt
     }
 
@@ -3335,7 +3335,7 @@ app.post('/api/tasks/:id/worktree/merge', (req, res) => {
           plan.status = 'done';
           plan.merged_at = plan.merged_at || new Date().toISOString();
           writeFileSync(planPath, JSON.stringify(plan, null, 2));
-        } catch {}
+        } catch (_) {}
       }
       return res.json({
         success: true,
@@ -3350,7 +3350,7 @@ app.post('/api/tasks/:id/worktree/merge', (req, res) => {
     try {
       execSync('git merge --abort', { cwd: project.path, encoding: 'utf-8', stdio: 'pipe' });
       console.log('[Merge] Aborted previous merge');
-    } catch {
+    } catch (_) {
       // No merge in progress, continue
     }
 
@@ -3376,7 +3376,7 @@ app.post('/api/tasks/:id/worktree/merge', (req, res) => {
         writeFileSync(gitignorePath, gitignore + '\n.worktrees/\n');
         console.log('[Merge] Added .worktrees to .gitignore');
       }
-    } catch {}
+    } catch (_) {}
 
     // Clean up untracked files that might conflict
     const filesToClean = ['.claude_settings.json', '.auto-claude-status'];
@@ -3386,7 +3386,7 @@ app.post('/api/tasks/:id/worktree/merge', (req, res) => {
         try {
           unlinkSync(filePath);
           console.log(`[Merge] Cleaned up ${file}`);
-        } catch {}
+        } catch (_) {}
       }
     }
 
@@ -3400,7 +3400,7 @@ app.post('/api/tasks/:id/worktree/merge', (req, res) => {
         const { rmSync } = require('fs');
         rmSync(localSpecDir, { recursive: true, force: true });
       }
-    } catch {}
+    } catch (_) {}
 
     // Perform the merge
     try {
@@ -3440,7 +3440,7 @@ app.post('/api/tasks/:id/worktree/merge', (req, res) => {
               execSync(`git checkout --theirs "${file}"`, { cwd: project.path, encoding: 'utf-8', stdio: 'pipe' });
               execSync(`git add "${file}"`, { cwd: project.path, encoding: 'utf-8', stdio: 'pipe' });
             }
-          } catch {}
+          } catch (_) {}
         }
 
         // Handle submodule conflicts - keep HEAD version (main branch's submodule state)
@@ -3457,19 +3457,19 @@ app.post('/api/tasks/:id/worktree/merge', (req, res) => {
                 // Checkout the HEAD version of the submodule reference
                 execSync(`git checkout HEAD -- "${submodule}"`, { cwd: project.path, encoding: 'utf-8', stdio: 'pipe' });
                 execSync(`git add "${submodule}"`, { cwd: project.path, encoding: 'utf-8', stdio: 'pipe' });
-              } catch {}
+              } catch (_) {}
             }
-          } catch {
+          } catch (_) {
             // If submodule handling fails, just try to add all and continue
             try {
               execSync('git add -A', { cwd: project.path, encoding: 'utf-8', stdio: 'pipe' });
-            } catch {}
+            } catch (_) {}
           }
         }
 
         try {
           execSync(`git commit -m "Merge ${branchName}"`, { cwd: project.path, encoding: 'utf-8' });
-        } catch {
+        } catch (_) {
           // If commit fails, there may still be conflicts - continue without commit
           console.log('[Merge] Auto-commit failed, attempting to continue');
         }
@@ -3477,7 +3477,7 @@ app.post('/api/tasks/:id/worktree/merge', (req, res) => {
         // No conflicts but merge failed - might be an untracked file issue, try to continue
         try {
           execSync('git merge --continue', { cwd: project.path, encoding: 'utf-8', stdio: 'pipe' });
-        } catch {
+        } catch (_) {
           throw mergeError;
         }
       } else {
@@ -3495,7 +3495,7 @@ app.post('/api/tasks/:id/worktree/merge', (req, res) => {
         // Try to drop the stash if pop failed - changes might already be in merge
         try {
           execSync('git stash drop', { cwd: project.path, encoding: 'utf-8', stdio: 'pipe' });
-        } catch {}
+        } catch (_) {}
       }
     }
 
@@ -3507,7 +3507,7 @@ app.post('/api/tasks/:id/worktree/merge', (req, res) => {
         plan.status = 'done';
         plan.merged_at = new Date().toISOString();
         writeFileSync(planPath, JSON.stringify(plan, null, 2));
-      } catch {}
+      } catch (_) {}
     }
 
     res.json({
@@ -3523,7 +3523,7 @@ app.post('/api/tasks/:id/worktree/merge', (req, res) => {
     if (hasStash) {
       try {
         execSync('git stash pop', { cwd: project.path, encoding: 'utf-8', stdio: 'pipe' });
-      } catch {}
+      } catch (_) {}
     }
     res.json({
       success: false,
@@ -3550,7 +3550,7 @@ app.post('/api/tasks/:id/worktree/discard', (req, res) => {
     }
     const branchName = `auto-claude/${req.params.id}`;
     execSync(`git branch -D ${branchName}`, { cwd: project.path, stdio: 'ignore' });
-  } catch {
+  } catch (_) {
     // Ignore errors
   }
 
@@ -3576,7 +3576,7 @@ app.get('/api/tasks/:id/worktree/merge-preview', (req, res) => {
     let baseBranch = 'main';
     try {
       execSync('git rev-parse --verify main', { cwd: project.path, encoding: 'utf-8', stdio: 'pipe' });
-    } catch {
+    } catch (_) {
       baseBranch = 'master';
     }
 
@@ -3585,7 +3585,7 @@ app.get('/api/tasks/:id/worktree/merge-preview', (req, res) => {
     try {
       const commitOutput = execSync(`git log ${baseBranch}..${branchName} --oneline`, { cwd: project.path, encoding: 'utf-8' });
       commits = commitOutput.trim().split('\n').filter(Boolean);
-    } catch {
+    } catch (_) {
       // Branch might not exist yet
     }
 
@@ -3594,12 +3594,12 @@ app.get('/api/tasks/:id/worktree/merge-preview', (req, res) => {
     try {
       const diffOutput = execSync(`git diff --name-only ${baseBranch}..${branchName}`, { cwd: project.path, encoding: 'utf-8' });
       files = diffOutput.trim().split('\n').filter(Boolean);
-    } catch {
+    } catch (_) {
       // Try getting files from worktree
       try {
         const statusOutput = execSync('git diff --name-only HEAD', { cwd: worktreePath, encoding: 'utf-8' });
         files = statusOutput.trim().split('\n').filter(Boolean);
-      } catch {}
+      } catch (_) {}
     }
 
     // Return proper preview format
@@ -3666,7 +3666,7 @@ app.get('/api/context', (req, res) => {
   if (existsSync(filePath)) {
     try {
       projectIndex = JSON.parse(readFileSync(filePath, 'utf-8'));
-    } catch {}
+    } catch (_) {}
   }
 
   // Use the global FalkorDB status for memory status
@@ -3679,7 +3679,7 @@ app.get('/api/context', (req, res) => {
     if (existsSync(stateFile)) {
       try {
         memoryState = JSON.parse(readFileSync(stateFile, 'utf-8'));
-      } catch {}
+      } catch (_) {}
     }
   }
 
@@ -3859,10 +3859,10 @@ app.get('/api/context/memories/search', async (req, res) => {
                 type: 'session_insight'
               });
             }
-          } catch { /* skip */ }
+          } catch (_e) { /* skip */ }
         }
       }
-    } catch { /* skip */ }
+    } catch (_e) { /* skip */ }
   }
 
   res.json({ success: true, data: results.slice(0, 20) });
@@ -3929,7 +3929,7 @@ app.get('/api/ideation', (req, res) => {
       } else {
         res.json({ success: true, data: ideation });
       }
-    } catch {
+    } catch (_) {
       res.json({ success: true, data: null });
     }
   } else {
@@ -3956,7 +3956,7 @@ app.post('/api/ideation/generate', (req, res) => {
       if (settings.autoBuildPath) {
         autoBuildPath = settings.autoBuildPath;
       }
-    } catch {}
+    } catch (_) {}
   }
 
   const ideationRunnerPath = path.join(autoBuildPath, 'runners', 'ideation_runner.py');
@@ -4031,7 +4031,7 @@ app.post('/api/ideation/generate', (req, res) => {
         try {
           const ideation = JSON.parse(readFileSync(ideationPath, 'utf-8'));
           broadcast('ideation:complete', { projectId, session: ideation });
-        } catch {
+        } catch (_) {
           broadcast('ideation:error', { projectId, error: 'Failed to parse ideation result' });
         }
       } else {
@@ -4103,7 +4103,7 @@ app.post('/api/ideation/ideas/:id/convert', (req, res) => {
       if (existingSpecs.length > 0) {
         nextNum = Math.max(...existingSpecs) + 1;
       }
-    } catch {}
+    } catch (_) {}
 
     // Create spec ID
     const slug = idea.title
@@ -4468,7 +4468,7 @@ app.get('/api/insights/session', (req, res) => {
     try {
       const sessions = JSON.parse(readFileSync(sessionsPath, 'utf-8'));
       res.json({ success: true, data: sessions.current || null });
-    } catch {
+    } catch (_) {
       res.json({ success: true, data: null });
     }
   } else {
@@ -4492,7 +4492,7 @@ app.get('/api/insights/sessions', (req, res) => {
     try {
       const data = JSON.parse(readFileSync(sessionsPath, 'utf-8'));
       res.json({ success: true, data: data.sessions || [] });
-    } catch {
+    } catch (_) {
       res.json({ success: true, data: [] });
     }
   } else {
@@ -4527,7 +4527,7 @@ app.delete('/api/insights/session', (req, res) => {
       const data = JSON.parse(readFileSync(sessionsPath, 'utf-8'));
       data.current = null;
       writeFileSync(sessionsPath, JSON.stringify(data, null, 2));
-    } catch {
+    } catch (_) {
       // Ignore
     }
   }
@@ -4561,7 +4561,7 @@ app.post('/api/insights/sessions', (req, res) => {
   if (existsSync(sessionsPath)) {
     try {
       data = JSON.parse(readFileSync(sessionsPath, 'utf-8'));
-    } catch {
+    } catch (_) {
       // Use default
     }
   }
@@ -4595,7 +4595,7 @@ app.post('/api/insights/sessions/:sessionId/switch', (req, res) => {
       } else {
         res.json({ success: true, data: null });
       }
-    } catch {
+    } catch (_) {
       res.json({ success: true, data: null });
     }
   } else {
@@ -4623,7 +4623,7 @@ app.delete('/api/insights/sessions/:sessionId', (req, res) => {
         data.current = null;
       }
       writeFileSync(sessionsPath, JSON.stringify(data, null, 2));
-    } catch {
+    } catch (_) {
       // Ignore
     }
   }
@@ -4651,7 +4651,7 @@ app.patch('/api/insights/sessions/:sessionId', (req, res) => {
         session.title = name;
         writeFileSync(sessionsPath, JSON.stringify(data, null, 2));
       }
-    } catch {
+    } catch (_) {
       // Ignore
     }
   }
@@ -4686,7 +4686,7 @@ app.get('/api/changelog/done-tasks', (req, res) => {
           if (plan.status === 'done' || plan.status === 'completed') {
             doneTasks.push({ id: specName, title: plan.title || specName });
           }
-        } catch {
+        } catch (_) {
           // Ignore
         }
       }
@@ -4735,7 +4735,7 @@ app.post('/api/changelog/done-tasks', (req, res) => {
           if (plan.status === 'done' || plan.status === 'completed') {
             doneTasks.push({ id: specName, title: plan.title || specName });
           }
-        } catch {
+        } catch (_) {
           // Ignore
         }
       }
@@ -4776,7 +4776,7 @@ app.get('/api/git/branches', (req, res) => {
     const output = execSync('git branch -a', { cwd: String(projectPath), encoding: 'utf-8' });
     const branches = output.trim().split('\n').map((b: string) => b.trim().replace(/^\* /, ''));
     res.json({ success: true, data: branches });
-  } catch {
+  } catch (_) {
     res.json({ success: true, data: [] });
   }
 });
@@ -4791,7 +4791,7 @@ app.get('/api/git/current-branch', (req, res) => {
   try {
     const branch = execSync('git branch --show-current', { cwd: String(projectPath), encoding: 'utf-8' }).trim();
     res.json({ success: true, data: branch });
-  } catch {
+  } catch (_) {
     res.json({ success: true, data: null });
   }
 });
@@ -4807,11 +4807,11 @@ app.get('/api/git/main-branch', (req, res) => {
     // Check if main exists
     execSync('git rev-parse --verify main', { cwd: String(projectPath), stdio: 'ignore' });
     res.json({ success: true, data: 'main' });
-  } catch {
+  } catch (_) {
     try {
       execSync('git rev-parse --verify master', { cwd: String(projectPath), stdio: 'ignore' });
       res.json({ success: true, data: 'master' });
-    } catch {
+    } catch (_) {
       res.json({ success: true, data: 'main' });
     }
   }
@@ -4833,7 +4833,7 @@ app.get('/api/git/status', (req, res) => {
     try {
       execSync('git rev-parse HEAD', { cwd: String(projectPath), stdio: 'ignore' });
       hasCommits = true;
-    } catch {
+    } catch (_) {
       hasCommits = false;
     }
 
@@ -4846,7 +4846,7 @@ app.get('/api/git/status', (req, res) => {
         changes: status.trim().split('\n').filter(Boolean)
       }
     });
-  } catch {
+  } catch (_) {
     res.json({ success: true, data: { isGitRepo: false, hasCommits: false } });
   }
 });
@@ -4893,7 +4893,7 @@ app.get('/api/tasks/:id/logs', (req, res) => {
     if (existsSync(logFile)) {
       try {
         return JSON.parse(readFileSync(logFile, 'utf-8'));
-      } catch {
+      } catch (_) {
         return null;
       }
     }
@@ -4975,7 +4975,7 @@ function loadAppSettings(): Record<string, unknown> {
     if (existsSync(SETTINGS_FILE)) {
       return JSON.parse(readFileSync(SETTINGS_FILE, 'utf-8'));
     }
-  } catch {}
+  } catch (_) {}
   return {};
 }
 
@@ -5053,7 +5053,7 @@ app.get('/api/github/issues', (req, res) => {
     });
     const issues = JSON.parse(output);
     res.json({ success: true, data: issues });
-  } catch {
+  } catch (_) {
     res.json({ success: true, data: [] });
   }
 });
@@ -5073,7 +5073,7 @@ app.get('/api/github/issues/:number', (req, res) => {
     });
     const issue = JSON.parse(output);
     res.json({ success: true, data: issue });
-  } catch {
+  } catch (_) {
     res.json({ success: false, error: 'Issue not found' });
   }
 });
@@ -5093,7 +5093,7 @@ app.get('/api/github/issues/:number/comments', (req, res) => {
     });
     const data = JSON.parse(output);
     res.json({ success: true, data: data.comments || [] });
-  } catch {
+  } catch (_) {
     res.json({ success: true, data: [] });
   }
 });
@@ -5103,7 +5103,7 @@ app.get('/api/github/status', (req, res) => {
   try {
     execSync('gh auth status', { encoding: 'utf-8', timeout: 5000 });
     res.json({ success: true, data: { connected: true } });
-  } catch {
+  } catch (_) {
     res.json({ success: true, data: { connected: false } });
   }
 });
@@ -5113,7 +5113,7 @@ app.get('/api/github/cli-status', (_req, res) => {
   try {
     const version = execSync('gh --version', { encoding: 'utf-8', timeout: 5000 });
     res.json({ success: true, data: { installed: true, version: version.trim().split('\n')[0] } });
-  } catch {
+  } catch (_) {
     res.json({ success: true, data: { installed: false } });
   }
 });
@@ -5124,7 +5124,7 @@ app.get('/api/github/auth-status', (_req, res) => {
     const output = execSync('gh auth status 2>&1', { encoding: 'utf-8', timeout: 5000 });
     const authenticated = output.includes('Logged in');
     res.json({ success: true, data: { authenticated } });
-  } catch {
+  } catch (_) {
     res.json({ success: true, data: { authenticated: false } });
   }
 });
@@ -5141,7 +5141,7 @@ app.get('/api/github/token', (_req, res) => {
   try {
     const token = execSync('gh auth token', { encoding: 'utf-8', timeout: 5000 }).trim();
     res.json({ success: true, data: { token } });
-  } catch {
+  } catch (_) {
     res.json({ success: false, error: 'No token available' });
   }
 });
@@ -5152,7 +5152,7 @@ app.get('/api/github/user', (_req, res) => {
     const output = execSync('gh api user', { encoding: 'utf-8', timeout: 5000 });
     const user = JSON.parse(output);
     res.json({ success: true, data: { username: user.login, name: user.name } });
-  } catch {
+  } catch (_) {
     res.json({ success: false, error: 'Failed to get user' });
   }
 });
@@ -5163,7 +5163,7 @@ app.get('/api/github/user/repos', (_req, res) => {
     const output = execSync('gh repo list --json name,owner,url --limit 50', { encoding: 'utf-8', timeout: 10000 });
     const repos = JSON.parse(output);
     res.json({ success: true, data: { repos } });
-  } catch {
+  } catch (_) {
     res.json({ success: true, data: { repos: [] } });
   }
 });
@@ -5184,7 +5184,7 @@ app.get('/api/github/detect', (req, res) => {
     } else {
       res.json({ success: true, data: null });
     }
-  } catch {
+  } catch (_) {
     res.json({ success: true, data: null });
   }
 });
@@ -5200,7 +5200,7 @@ app.get('/api/github/branches', (req, res) => {
     const output = execSync(`gh api repos/${owner}/${repo}/branches --jq '.[].name'`, { encoding: 'utf-8', timeout: 10000 });
     const branches = output.trim().split('\n').filter(Boolean);
     res.json({ success: true, data: branches });
-  } catch {
+  } catch (_) {
     res.json({ success: true, data: [] });
   }
 });
@@ -5255,7 +5255,7 @@ app.get('/api/docker/status', (_req, res) => {
         falkorDbPort: 6379
       }
     });
-  } catch {
+  } catch (_) {
     res.json({
       success: true,
       data: {
@@ -5286,7 +5286,7 @@ app.post('/api/docker/falkordb/stop', (_req, res) => {
   try {
     execSync('docker stop falkordb && docker rm falkordb', { encoding: 'utf-8', timeout: 10000 });
     res.json({ success: true });
-  } catch {
+  } catch (_) {
     res.json({ success: true }); // Ignore if not running
   }
 });
@@ -5381,7 +5381,7 @@ app.get('/api/changelog/branches', (req, res) => {
         cwd: project.path,
         encoding: 'utf-8'
       }).trim();
-    } catch {}
+    } catch (_) {}
 
     // Get all branches
     const output = execSync('git branch -a --format="%(refname:short)|%(HEAD)"', {
@@ -5635,7 +5635,7 @@ app.post('/api/changelog/generate', async (req, res) => {
   let claudePath = 'claude';
   try {
     claudePath = execSync('which claude', { encoding: 'utf-8' }).trim();
-  } catch {
+  } catch (_) {
     // Try common paths
     const paths = ['/usr/local/bin/claude', '/usr/bin/claude', `${process.env.HOME}/.claude/bin/claude`];
     for (const p of paths) {
