@@ -544,6 +544,24 @@ async def run_agent_session(
             message_count=message_count,
             tool_count=tool_count,
         )
+
+        # Check if this is a rate limit error and try to switch profiles
+        error_str = str(e)
+        from core.profiles import is_rate_limit_error, switch_to_fallback
+
+        if is_rate_limit_error(error_str):
+            print(f"\n[Rate Limit] Detected rate limit: {error_str}")
+            fallback = switch_to_fallback()
+            if fallback:
+                print(f"[Rate Limit] Will retry with {fallback.description}")
+                if task_logger:
+                    task_logger.log_info(
+                        f"Rate limit hit, switching to {fallback.description}", phase
+                    )
+                return "rate_limit", error_str
+            else:
+                print("[Rate Limit] No fallback profile available")
+
         print(f"Error during agent session: {e}")
         if task_logger:
             task_logger.log_error(f"Session error: {e}", phase)

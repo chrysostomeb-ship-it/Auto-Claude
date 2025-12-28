@@ -162,9 +162,10 @@ def get_phase_model(
 
     Priority:
     1. CLI argument (if provided)
-    2. Phase-specific config from task_metadata.json (if auto profile)
-    3. Single model from task_metadata.json (if not auto profile)
-    4. Default phase configuration
+    2. Active profile model (if profile system is configured)
+    3. Phase-specific config from task_metadata.json (if auto profile)
+    4. Single model from task_metadata.json (if not auto profile)
+    5. Default phase configuration
 
     Args:
         spec_dir: Path to the spec directory
@@ -177,6 +178,17 @@ def get_phase_model(
     # CLI argument takes precedence
     if cli_model:
         return resolve_model_id(cli_model)
+
+    # Check for active profile (Z.AI or Claude Max)
+    try:
+        from core.profiles import get_active_profile
+
+        profile = get_active_profile()
+        if profile:
+            # Active profile overrides all other model settings
+            return profile.model
+    except ImportError:
+        pass  # profiles module not available
 
     # Load task metadata
     metadata = load_task_metadata(spec_dir)

@@ -4,12 +4,18 @@ Authentication helpers for Auto Claude.
 Provides centralized authentication token resolution with fallback support
 for multiple environment variables, and SDK environment variable passthrough
 for custom API endpoints.
+
+Supports multi-profile configuration:
+- Z.AI (GLM-4.7) as default
+- Claude Max (Opus 4.5) as fallback when rate limited
 """
 
 import json
 import os
 import platform
 import subprocess
+
+from core.profiles import get_active_profile, initialize_active_profile
 
 # Priority order for auth token resolution
 # NOTE: We intentionally do NOT fall back to ANTHROPIC_API_KEY.
@@ -90,12 +96,13 @@ def get_token_from_keychain() -> str | None:
 
 def get_auth_token() -> str | None:
     """
-    Get authentication token from environment variables or macOS Keychain.
+    Get authentication token from active profile or environment variables.
 
     Checks multiple sources in priority order:
-    1. CLAUDE_CODE_OAUTH_TOKEN (env var)
-    2. ANTHROPIC_AUTH_TOKEN (CCR/proxy env var for enterprise setups)
-    3. macOS Keychain (if on Darwin platform)
+    1. Active profile (ZAI or Claude Max based on ACTIVE_PROFILE)
+    2. CLAUDE_CODE_OAUTH_TOKEN (env var)
+    3. ANTHROPIC_AUTH_TOKEN (CCR/proxy env var for enterprise setups)
+    4. macOS Keychain (if on Darwin platform)
 
     NOTE: ANTHROPIC_API_KEY is intentionally NOT supported to prevent
     silent billing to user's API credits when OAuth is misconfigured.
@@ -103,7 +110,12 @@ def get_auth_token() -> str | None:
     Returns:
         Token string if found, None otherwise
     """
-    # First check environment variables
+    # First check active profile
+    profile = get_active_profile()
+    if profile:
+        return profile.auth_token
+
+    # Then check environment variables
     for var in AUTH_TOKEN_ENV_VARS:
         token = os.environ.get(var)
         if token:
@@ -115,7 +127,12 @@ def get_auth_token() -> str | None:
 
 def get_auth_token_source() -> str | None:
     """Get the name of the source that provided the auth token."""
-    # Check environment variables first
+    # Check active profile first
+    profile = get_active_profile()
+    if profile:
+        return f"Profile: {profile.description}"
+
+    # Check environment variables
     for var in AUTH_TOKEN_ENV_VARS:
         if os.environ.get(var):
             return var
@@ -166,14 +183,26 @@ def get_sdk_env_vars() -> dict[str, str]:
     Collects relevant env vars (ANTHROPIC_BASE_URL, etc.) that should
     be passed through to the claude-agent-sdk subprocess.
 
+    Also includes profile-specific settings if a profile is active.
+
     Returns:
         Dict of env var name -> value for non-empty vars
     """
     env = {}
+
+    # Apply active profile settings first
+    profile = get_active_profile()
+    if profile:
+        env["ANTHROPIC_AUTH_TOKEN"] = profile.auth_token
+        if profile.base_url:
+            env["ANTHROPIC_BASE_URL"] = profile.base_url
+
+    # Collect other SDK env vars (may override profile settings)
     for var in SDK_ENV_VARS:
         value = os.environ.get(var)
         if value:
             env[var] = value
+
     return env
 
 
@@ -190,3 +219,21 @@ def ensure_claude_code_oauth_token() -> None:
     token = get_auth_token()
     if token:
         os.environ["CLAUDE_CODE_OAUTH_TOKEN"] = token
+
+
+def setup_profiles() -> None:
+    """
+    Initialize and setup profile configuration at startup.
+
+    This should be called early in the application startup to:
+    1. Initialize the active profile from ACTIVE_PROFILE env var
+    2. Apply profile settings to environment variables
+    3. Print profile status for debugging
+    """
+    from core.profiles import initialize_active_profile, print_profile_status
+
+    profile = initialize_active_profile()
+    if profile:
+        print_profile_status()
+    else:
+        print("[Profiles] No profiles configured, using environment variables")

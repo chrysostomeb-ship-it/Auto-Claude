@@ -431,6 +431,13 @@ async def run_autonomous_agent(
 
             await asyncio.sleep(AUTO_CONTINUE_DELAY_SECONDS)
 
+        elif status == "rate_limit":
+            # Rate limit detected, profile already switched by run_agent_session
+            print_status("Rate limit detected, profile switched", "warning")
+            print(muted("Will retry with new profile..."))
+            status_manager.update(state=BuildState.BUILDING)
+            await asyncio.sleep(2)  # Short delay before retry
+
         elif status == "error":
             print_status("Session encountered an error", "error")
             print(muted("Will retry with a fresh session..."))
