@@ -3290,13 +3290,33 @@ app.post('/api/tasks/:id/worktree/merge', (req, res) => {
           }
         } catch (_) {}
       }
-      // Fallback to main/master if no parent_branch stored
+      // Fallback to common branch names if no parent_branch stored
       if (!baseBranch) {
-        try {
-          execSync('git rev-parse --verify main', { cwd: project.path, encoding: 'utf-8', stdio: 'pipe' });
+        // Try common branch names in order: main, master, dev, develop
+        const commonBranches = ['main', 'master', 'dev', 'develop'];
+        for (const branch of commonBranches) {
+          try {
+            execSync(`git rev-parse --verify ${branch}`, { cwd: project.path, encoding: 'utf-8', stdio: 'pipe' });
+            baseBranch = branch;
+            console.log(`[Merge] Using fallback branch: ${branch}`);
+            break;
+          } catch (_) {
+            // Branch doesn't exist, try next
+          }
+        }
+        // If still no branch found, use current HEAD (excluding worktree branch)
+        if (!baseBranch) {
+          try {
+            const currentBranch = execSync('git rev-parse --abbrev-ref HEAD', { cwd: project.path, encoding: 'utf-8' }).trim();
+            if (!currentBranch.startsWith('auto-claude/')) {
+              baseBranch = currentBranch;
+              console.log(`[Merge] Using current branch as fallback: ${baseBranch}`);
+            }
+          } catch (_) {}
+        }
+        // Ultimate fallback
+        if (!baseBranch) {
           baseBranch = 'main';
-        } catch (_) {
-          baseBranch = 'master';
         }
       }
     }
